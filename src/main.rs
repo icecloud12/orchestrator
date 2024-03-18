@@ -1,3 +1,7 @@
-fn main() {
-    println!("Hello, world!");
+use dotenv::dotenv;
+
+mod network;
+#[tokio::main]
+async fn main() {
+    dotenv().ok();
 }
