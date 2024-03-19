@@ -4,7 +4,7 @@ use serde_json::Value;
 
 pub async fn router()->axum::Router {
     let router = Router::new()
-        .route("/",
+        .route("/*path",
             delete(active_service_discovery)
             .get(active_service_discovery)
             .patch(active_service_discovery)
