@@ -4,7 +4,7 @@ use serde_json::Value;
 
 pub async fn router()->axum::Router {
     let router = Router::new()
-        .route("/active-service-discovery",
+        .route("/",
             delete(active_service_discovery)
             .get(active_service_discovery)
             .patch(active_service_discovery)
@@ -22,7 +22,7 @@ pub async fn active_service_discovery(
         //header:HeaderMap, payload:Option<Json<Value>>)
         request: Request){
     // create logic in listen docker containers
-    
+    println!("{:#?}", &request);
     let uri = request.uri();
     let method = request.method();
     let body = request.body();
