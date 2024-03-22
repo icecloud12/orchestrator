@@ -1,7 +1,7 @@
-use std::{collections::HashMap, process::{self, exit}};
+use std::{collections::HashMap, hash::Hash, process::{self, exit}};
 
 use axum::{extract::{DefaultBodyLimit, Request}, http::uri, routing::{delete, get, patch, post, put}, Router};
-use bollard::{container::{self, Config, CreateContainerOptions, ListContainersOptions, StartContainerOptions}, image::ListImagesOptions, secret::Port, Docker};
+use bollard::{container::{self, Config, CreateContainerOptions, ListContainersOptions, StartContainerOptions}, image::ListImagesOptions, secret::{HostConfig, Port, PortBinding}, Docker};
 use hyper::Uri;
 use mongodb::{bson::doc, options::CreateCollectionOptions, Database};
 use serde::{Deserialize, Serialize};
@@ -93,33 +93,47 @@ pub async fn docker_manager(docker_uri:String){
                     match containers_result {
                         Ok(containers)  =>{
                             
-                            if(containers.len() > 0){
+                            if containers.len() > 0{
                                 println!("list of contaienrs {:#?}",containers);
                                 //get first instance for now
                                 let container = containers[0].clone();
                                 println!("containerState:{:#?}", container.state)
                             }else{
                                 println!("generate container:{}",image);
-                                //create the container
-                                //bruh it uses the ID
+                                
+                                let local_port: u16 = 3001;
+                                let container_port:u16 = 4002;
+                                let mut port_binding = HashMap::new();
+                                port_binding.insert(container_port.to_string(), Some(vec![PortBinding {
+                                    //external port
+                                    host_port: Some(local_port.to_string()),
+                                    //localhost
+                                    host_ip: Some("0.0.0.0".to_string())
+    
+                                }]));
+                                let host_config = HostConfig {
+                                    
+                                    port_bindings: Some(port_binding),
+                                    network_mode: Some("bridge".to_string()),
+                                    ..Default::default()
+                                };
+                                let mut exposed_ports = HashMap::new();
+                                exposed_ports.insert("4002/tcp", HashMap::new());
+                                //static image for now
                                 let test_image:String = "72b3512dbf1fd82c4df4f884ac85898bfd11e5b1bc6c491c3f75592583fd22c7".to_string();
                                 let container_config = Config {
-                                    //maybe we can setup a naming convention for containers owo
-                                    //image: Some(image.as_str()),
+                                    
                                     image:Some(test_image.as_str()),
+                                    exposed_ports:Some(exposed_ports),
+                                    host_config: Some(host_config),
                                     ..Default::default()
                                 };
                                 
-                                // //let the loadbalancer do this next-time
-                                // let new_container_name = format!("{prefix}-{instance}",prefix= container_route.prefix.as_str(), instance = 1.to_string().as_str());
-                                // let options: Option<CreateContainerOptions<&str>> = Some(CreateContainerOptions{
-                                //     name: new_container_name.as_str(),
-                                //     platform: None,
-                                // });
                                 match  docker.create_container(None::<CreateContainerOptions<&str>>,container_config).await {
                                     Ok(container_create_result) => {
                                         //find container name by id
                                         println!("created_container_result:{:#?}",container_create_result);
+                
                                         let mut filters = HashMap::new();
                                         filters.insert("id", vec![container_create_result.id.as_str()]);
                                         let list_container_options = ListContainersOptions {
