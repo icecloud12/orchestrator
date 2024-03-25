@@ -1,7 +1,7 @@
 use std::sync::OnceLock;
 use mongodb::{options::ClientOptions, Client, Database};
 
-pub static Database:OnceLock<Database> = OnceLock::new();
+pub static DATABASE:OnceLock<Database> = OnceLock::new();
 
 pub async fn connect()-> Database{
     //database connection
@@ -13,12 +13,16 @@ pub async fn connect()-> Database{
 
 pub enum DBCollection {
     ROUTES,
+    LOAD_BALANCERS,
+    CONTAINERS,
 }
 
 impl ToString for DBCollection {
     fn to_string(&self) -> String {
         match &self {
-            &Self::ROUTES => "routes".to_string()
+            &Self::ROUTES => "routes".to_string(),
+            &Self::LOAD_BALANCERS => "load_balancers".to_string(),
+            &Self::CONTAINERS => "containers".to_string(),
         }    
     }
 }
