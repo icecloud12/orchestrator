@@ -1,15 +1,17 @@
-use std::os::windows::process;
+use std::{os::windows::process, sync::{Arc}};
 
+use bollard::Docker;
 use dotenv::dotenv;
 use network::app_router::router;
-use utils::mongodb_utils::Database;
+use utils::{docker_utils:: DOCKER_CONNECTION, mongodb_utils::DATABASE};
 mod utils;
 mod network;
+mod models;
 #[tokio::main]
 async fn main() {
     dotenv().ok();
-    //setup database connection
-    match Database.set(utils::mongodb_utils::connect().await) {
+    DOCKER_CONNECTION.get_or_init(|| Docker::connect_with_local_defaults().unwrap());
+    match DATABASE.set(utils::mongodb_utils::connect().await) {
         Ok(_)=>{
             listen().await;
         },
@@ -17,9 +19,7 @@ async fn main() {
             println!("Cannot connect to database...exiting");
             std::process::exit(0);
         }
-    }
-
-       
+    }  
 }
 async fn listen(){
     let router = router().await;
