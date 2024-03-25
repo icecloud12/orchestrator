@@ -1,13 +1,29 @@
-use std::{collections::HashMap, hash::Hash, process::{self, exit}};
 
-use axum::{extract::{DefaultBodyLimit, Request}, http::uri, routing::{delete, get, patch, post, put}, Router};
-use bollard::{container::{self, Config, CreateContainerOptions, ListContainersOptions, StartContainerOptions}, image::ListImagesOptions, secret::{HostConfig, Port, PortBinding}, Docker};
-use hyper::Uri;
-use mongodb::{bson::doc, options::CreateCollectionOptions, Database};
-use serde::{Deserialize, Serialize};
-use crate::utils::mongodb_utils::{self, DBCollection, Database};
+use std::{collections::HashMap, ops::Deref, str::FromStr};
+
+use axum::{body::{self, Body}, extract::{DefaultBodyLimit, Request, State}, response::IntoResponse, routing::{delete, get, patch, post, put}, Router};
+use bollard::auth;
+use hyper::{upgrade::Upgraded, Method, StatusCode, Uri, Response};
+use mongodb::{bson::{bson, doc, oid::ObjectId, Bson}, Database};
+use reqwest::Client;
+use std::net::SocketAddr;
+
+use bytes::Bytes;
+use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
+use hyper::client::conn::http1::Builder;
+use hyper::server::conn::http1;
+use hyper::service::service_fn;
+use hyper_util::rt::tokio::TokioIo;
+
+
+use tokio::{io::{self, AsyncWriteExt as _}, net::{TcpListener, TcpStream}};
+
+use crate::{models::docker_models::{Container, LoadBalancer}, utils::{docker_utils::{get_load_balancer_instances, route_container, route_load_balancer, try_start_container}, mongodb_utils::{DBCollection, DATABASE}}};
+use crate::models::docker_models::{ContainerRoute};
+
 
 pub async fn router()->axum::Router {
+    let client = Client::new();
     let router = Router::new()
         .route("/*path",
             delete(active_service_discovery)
@@ -15,175 +31,168 @@ pub async fn router()->axum::Router {
             .patch(active_service_discovery)
             .post(active_service_discovery)
             .put(active_service_discovery)
-        );
+        ).with_state(client);
         
     return router;
 }
 
-pub async fn active_service_discovery(
-        //path:Path<Vec<(String, String)>>, 
-        //query(Query(params)):Query<HashMap<String,String>>,
-        //header:HeaderMap, payload:Option<Json<Value>>)
-        request: Request){
-    // create logic in listen docker containers
-    //println!("{:#?}", &request);
+pub async fn active_service_discovery(State(client): State<Client>, request: Request) -> impl IntoResponse{
+    
     let uri = request.uri();
     let _method = request.method();
     let _body = request.body();
     let _header = request.headers();
 
-    
-    //need to do some logic where uri = docker_route
-    let _a = docker_manager(uri.to_string()).await;
-    //check the request who the request is for (which server is going to be hit)
-    // check if there is an active docker container for it
-            //fetch port
-    // if not create instance of docker container
-            //fetch port
-    //port forward to the appropriate container
-    //return result of container
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)] 
-struct ContainerRoute {
-    pub image_name: String,
-    pub address: String,
-    pub prefix: String,
-}
-
-pub async fn docker_manager(docker_uri:String){
-    let docker_connect: Result<Docker, bollard::errors::Error> = Docker::connect_with_named_pipe_defaults();
-    match docker_connect {
-        Ok(docker) =>{
-            println!("can connect to docker");
-            let database: &Database = mongodb_utils::Database.get().unwrap();
-            let container_route_result = database.collection::<ContainerRoute>(DBCollection::ROUTES.to_string().as_str()).find_one(doc! {"address": "/lcr/api/"}, None).await;
-            println!("contaier_route_results:{:#?}",container_route_result);
-            match container_route_result.unwrap() {
-                Some(container_route)=>{
-                    println!("some container route:{:#?}",container_route);
-                    let image = container_route.image_name;
-                    //get containers that instaces this
-                    let mut filters = HashMap::new();
-                    filters.insert("health", vec!["none"]);
-                    filters.insert("ancestor", vec![image.as_str()]);
-                    let container_options = Some(ListContainersOptions {
-                        all: true,
-                        filters: filters,
-                        ..Default::default()
-                    });
-                    let containers_result: Result<Vec<bollard::secret::ContainerSummary>, bollard::errors::Error> = docker.list_containers(container_options).await;
-                    //need to implement a load balancer for the containers
-                    println!("containers search result{:#?}",containers_result);
-
-                    {
-                        let mut filters = HashMap::new();
-                        filters.insert("dangling", vec!["false"]);
-
-                        let options = Some(ListImagesOptions{
-                        all: true,
-                        filters,
-                        ..Default::default()
-                        });
-                        println!("image List");
-                        println!("{:#?}",docker.list_images(options).await);
-
-                    }
-
-                    match containers_result {
-                        Ok(containers)  =>{
-                            
-                            if containers.len() > 0{
-                                println!("list of contaienrs {:#?}",containers);
-                                //get first instance for now
-                                let container = containers[0].clone();
-                                println!("containerState:{:#?}", container.state)
-                            }else{
-                                println!("generate container:{}",image);
-                                
-                                let local_port: u16 = 3001;
-                                let container_port:u16 = 4002;
-                                let mut port_binding = HashMap::new();
-                                port_binding.insert(container_port.to_string(), Some(vec![PortBinding {
-                                    //external port
-                                    host_port: Some(local_port.to_string()),
-                                    //localhost
-                                    host_ip: Some("0.0.0.0".to_string())
-    
-                                }]));
-                                let host_config = HostConfig {
-                                    
-                                    port_bindings: Some(port_binding),
-                                    network_mode: Some("bridge".to_string()),
-                                    ..Default::default()
-                                };
-                                let mut exposed_ports = HashMap::new();
-                                exposed_ports.insert("4002/tcp", HashMap::new());
-                                //static image for now
-                                let test_image:String = "72b3512dbf1fd82c4df4f884ac85898bfd11e5b1bc6c491c3f75592583fd22c7".to_string();
-                                let container_config = Config {
-                                    
-                                    image:Some(test_image.as_str()),
-                                    exposed_ports:Some(exposed_ports),
-                                    host_config: Some(host_config),
-                                    ..Default::default()
-                                };
-                                
-                                match  docker.create_container(None::<CreateContainerOptions<&str>>,container_config).await {
-                                    Ok(container_create_result) => {
-                                        //find container name by id
-                                        println!("created_container_result:{:#?}",container_create_result);
-                
-                                        let mut filters = HashMap::new();
-                                        filters.insert("id", vec![container_create_result.id.as_str()]);
-                                        let list_container_options = ListContainersOptions {
-                                            all: true,
-                                            filters: filters,
-                                            ..Default::default()
-                                        };
-                                        let container_search_result = docker.list_containers(Some(list_container_options)).await.unwrap(); //expects 1 result
-                                        if container_search_result.get(0).is_some() {
-                                            println!("container_search_result:{:#?}",container_search_result);
-                                            let container = container_search_result[0].clone();
-                                            let container_name = container.id.unwrap();
-                                            let start_container_result = docker.start_container(container_name.as_str(), None::<StartContainerOptions<String>>).await;
-                                            match start_container_result {
-                                                Ok(_) => {
-                                                    let port: &Port = &container.ports.unwrap()[0];
-                                                    println!("new container running in port:{:#?}", port.private_port);
-                                                },
-                                                Err(_) => {
-                                                    println!("cannot start container")
-                                                }
-                                            };
-
-                                        }
-                                    },
-                                    Err(e) => {
-                                        println!("Cannot create container:{}", e);
-                                    }
-                                };
-
-                            }
-                        }
-                        Err(e) => {
-                            println!("Cannot generate list of containers: {}",e)
-                        }
-                    }
-                    
-
-                }
-                None => {
-                    //transfer to 404 page
-                    println!("cannot find containerRoute");
-                }
-            }
+    let response = match route_identifier(uri.path_and_query().unwrap().to_string()).await {
+        Some(docker_image) => {
+            println!("{}", docker_image);
+            //check instances of the load_balancer
+            let load_balancer =get_load_balancer_instances(docker_image).await;
             
 
+            port_forward_request(client, load_balancer, request).await;
+           (StatusCode::OK).into_response() 
         },
-        Err(e) =>{
-            println!("Cannot connect to docker: {e}", e=e);
-            std::process::exit(0)
+        None => {
+            (StatusCode::NOT_FOUND).into_response()
+        }
+    };
+    return response;
+}
+
+
+
+
+///returns the Router Docker Image 
+pub async fn route_identifier(uri:String) -> Option<String>{
+    
+    let database: &Database = DATABASE.get().unwrap();
+    let collection_name = DBCollection::ROUTES.to_string();
+    let collection = database.collection::<ContainerRoute>(collection_name.as_str());
+    let mut cursor: mongodb::Cursor<ContainerRoute> = collection.find( 
+        doc! {
+            "$expr": {
+                "$eq": [
+                    {
+                        "$indexOfBytes": [
+                            uri.clone(),
+                            "$address"
+                           
+                        ]
+                    },
+                    0
+                ]
+            }
+          }, None).await.unwrap();
+    
+    let mut container_route_matches: Vec<ContainerRoute> = Vec::new();
+    while cursor.advance().await.unwrap() {
+        let document_item: Result<ContainerRoute, mongodb::error::Error> = cursor.deserialize_current();
+        match document_item {
+            Ok(document) => {
+                container_route_matches.push(document);
+            }
+            Err(_) =>{}
+        }        
+    }
+    if container_route_matches.len() == 0 { //no matching routes
+        return None
+    }else if container_route_matches.len() == 1 {
+        return Some(container_route_matches[0].image_name.clone());
+    }
+    else{
+        return Some(route_resolver(container_route_matches, uri))
+    }
+        
+}
+///helper function to help resolve multiple route results
+pub fn route_resolver(container_route_matches:Vec<ContainerRoute>, uri:String) -> String{
+
+    let routes:Vec<Vec<String>> = container_route_matches.iter().map(|container_route| {
+        let route:Vec<String> = container_route.address.split("/").filter(|s| s.to_owned()!="").map(String::from).collect();
+        route
+    }).collect();
+    //need to optimize/gets running per split instead of generally at the end
+    let uri_split:Vec<String> = uri.split("/").filter(|x| x.to_owned() != "").map(|x| {
+        let split_strings = vec!["?", "#"];
+        let mut clone_string = x.to_owned();
+        for split_string in split_strings{
+            clone_string = clone_string.split(split_string).into_iter().collect::<Vec<&str>>()[0].to_string();
+        }
+        let ret_string: String = clone_string.clone();
+        return ret_string
+    }).into_iter().collect();
+
+    
+    let mut matched_index:usize = 0;
+    let mut max_matches:usize = 0;
+    for (container_index, container_route) in routes.iter().enumerate() {
+        //let mut current_matches:usize = 0;
+        let minimun_matches:usize = container_route.len();
+        if uri_split.starts_with(container_route) && minimun_matches > max_matches{
+            matched_index = container_index;
+            max_matches = minimun_matches
         }
     }
+    return container_route_matches[matched_index].image_name.clone();
 }
+
+pub async fn port_forward_request(client:Client, load_balancer:LoadBalancer, request:Request){
+    let database = DATABASE.get().unwrap();
+    let http = "https";
+
+    let container_id = route_container(load_balancer).await;
+    let object_id:ObjectId = ObjectId::from_str(container_id.as_str()).unwrap();
+    println!("{:#?}",object_id);
+    let container_result = database.collection::<Container>(DBCollection::CONTAINERS.to_string().as_str()).find_one(doc! {"_id": object_id}, None).await.unwrap().unwrap();
+
+    //try to start the container if not starting
+    match try_start_container(container_result.container_id).await {
+        Ok(_)=>{let body = request.into_body();
+            let _ = handshake(format!("{http_type}://0.0.0.0:{port}", http_type=http, port=container_result.public_port), body).await;},
+        Err(_)=>{}
+    }
+
+    
+}
+
+pub async fn handshake(url:String, body:Body)->Result<(),()>{
+    //open a TCP connection to the remote host
+    let remote_url =    url.parse::<hyper::Uri>().unwrap();
+    let host = remote_url.host().expect("uri has no host");
+    let port = remote_url.port_u16().unwrap_or(80);
+
+    let address = format!("{}:{}", host, port);
+    match TcpStream::connect(address.clone()).await {
+        Ok(stream) =>{
+            let io = TokioIo::new(stream);
+            let (mut sender, conn) =  hyper::client::conn::http1::handshake(io).await.unwrap();
+            tokio::task::spawn(async move {
+                if let Err(err) = conn.await {
+                    println!("Connection failed: {:?}", err);
+                }
+            });
+            let authority = remote_url.authority().unwrap().clone();
+            let req = Request::builder()
+            .uri(remote_url)
+            .header(hyper::header::HOST, authority.as_str())
+            .body(body).unwrap();
+            let mut res = sender.send_request(req).await.unwrap();
+            // Stream the body, writing each frame to stdout as it arrives
+            while let Some(next) = res.frame().await {
+                let frame = next.unwrap();
+                if let Some(chunk) = frame.data_ref() {
+                    io::stdout().write_all(chunk).await.unwrap();
+                }
+            }  
+        },
+        Err(_)=>{
+            //cannot create a tcp_stream connection
+        }
+    }
+    Ok(())
+    
+}
+
+
+
