@@ -6,8 +6,6 @@ use hyper::{StatusCode};
 use mongodb::{bson::{doc, oid::ObjectId}, Database};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use reqwest::Client;
-
 
 use crate::models::docker_models::{Container, ContainerInsert, ContainerRoute, LoadBalancer, LoadBalancerInsert};
 
@@ -116,7 +114,7 @@ pub async fn create_container_instance (docker_image:String,)
         }]));
         let options = Some(CreateContainerOptions::<String>{..Default::default() });
         let host_config:HostConfig = HostConfig {
-
+            port_bindings : Some(port_binding),
             ..Default::default()
         };
         let config = Config {
@@ -186,7 +184,7 @@ pub async fn try_start_container(docker_container_id:String)->Result<(),String>{
     let docker = DOCKER_CONNECTION.get().unwrap();
     //check if it is running
     let container_summary = docker.inspect_container(&docker_container_id, None).await.unwrap();
-
+    
     match container_summary.state.unwrap().status.unwrap() {
         
         ContainerStateStatusEnum::RUNNING => {Ok(())},
