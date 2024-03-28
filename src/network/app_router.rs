@@ -222,7 +222,9 @@ pub async fn handshake_and_send(parts:Parts, body:Body, public_port:usize){
     
     
 }
+struct ApiResponse{
 
+}
 pub async fn forward_request(parts:Parts, body:Body, public_port:usize){
     //get the certificate
     let mut cert_buffer: Vec<u8> = Vec::new();
@@ -236,20 +238,20 @@ pub async fn forward_request(parts:Parts, body:Body, public_port:usize){
             println!("cert vector: {:#?}",certs[0]);
             let mut client_builder = reqwest::ClientBuilder::new();
 
-            for cert in certs.into_iter(){
-                client_builder = client_builder.add_root_certificate(cert);
-            };
-            let client = client_builder.use_rustls_tls().build().unwrap();
+            let client = client_builder.use_rustls_tls().danger_accept_invalid_certs(true).build().unwrap();
 
             
             match parts.method {
                 Method::GET => {
                 println!("SENDING A GET REQUEST");
-                match client.get("https://localhost:57695/lcr/api/country")
+                match client.get("https://localhost:38052/lcr/api/country")
+                //match client.get("https://www.google.com/")
                     .send()
                     .await {
                         Ok(result) => {
-                            print!("request result: {:#?}", result);
+                            println!("in response");
+                            let res = result.text_with_charset("utf-8").await;
+                            print!("request result: {:#?}", res);
                             
                         }
                         Err(error) => {
