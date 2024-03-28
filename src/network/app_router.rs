@@ -1,15 +1,12 @@
 
-use std::{collections::HashMap, future::IntoFuture, net::{IpAddr, Ipv4Addr}, ops::Deref, path::PathBuf, str::FromStr};
+use std::{str::FromStr, sync::Arc, time::UNIX_EPOCH};
 
-use axum::{body::{self, Body}, extract::{DefaultBodyLimit, Request, State}, http::request::Parts, response::IntoResponse, routing::{delete, get, patch, post, put}, Router};
+use axum::{body::{self, Body, to_bytes}, extract::Request, http::request::Parts, response::IntoResponse, routing::{delete, get, patch, post, put}, RequestPartsExt, Router};
 use bollard::{auth};
-use hyper::{upgrade::Upgraded, Method, Response, StatusCode, Uri, Version};
+use hyper::{upgrade::Upgraded, HeaderMap, Method, Response, StatusCode, Uri, Version};
 use mongodb::{bson::{bson, doc, oid::ObjectId, Bson}, Database};
-
-use std::net::SocketAddr;
-
 use bytes::Bytes;
-use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
+use http_body_util::{combinators::{BoxBody, UnsyncBoxBody}, BodyExt, Empty, Full};
 
 use hyper::service::service_fn;
 use hyper::{client::conn::http1};
@@ -26,28 +23,31 @@ pub async fn router()->axum::Router {
     
     let router = Router::new()
         .route("/*path",
-            delete(active_service_discovery)
-            .get(active_service_discovery)
-            .patch(active_service_discovery)
-            .post(active_service_discovery)
-            .put(active_service_discovery)
+        get(active_service_discovery)
+        .patch(active_service_discovery)
+        .post(active_service_discovery)
+        .put(active_service_discovery)
+        .delete(active_service_discovery)
         );
         
     return router;
 }
 
-pub async fn active_service_discovery(request: Request) -> impl IntoResponse{
+pub async fn active_service_discovery(request: Request<Body>) 
+-> impl IntoResponse
+{
     println!("recieved request");
+    println!("request:{:#?}",&request);
+    
     let (parts,body) = request.into_parts();
-
     let response = match route_identifier(parts.uri.path_and_query().unwrap().to_string()).await {
         Some(docker_image) => {
             println!("{}", docker_image);
             //check instances of the load_balancer
             let load_balancer =get_load_balancer_instances(docker_image).await;
 
-            port_forward_request(load_balancer, parts, body).await;
-           (StatusCode::OK).into_response() 
+            let port_forward_result = port_forward_request(load_balancer, parts, body).await;
+            port_forward_result.into_response()
         },
         None => {
             (StatusCode::NOT_FOUND).into_response()
@@ -133,28 +133,28 @@ pub fn route_resolver(container_route_matches:Vec<ContainerRoute>, uri:String) -
     return container_route_matches[matched_index].image_name.clone();
 }
 
-pub async fn port_forward_request(load_balancer:LoadBalancer, parts:Parts, body:Body){
+pub async fn port_forward_request(load_balancer:LoadBalancer, parts:Parts, body:Body) -> impl IntoResponse{
     let database = DATABASE.get().unwrap();
-    let http = "https";
-
     let container_id = route_container(load_balancer).await;
     let object_id:ObjectId = ObjectId::from_str(container_id.as_str()).unwrap();
     println!("{:#?}",object_id);
     let container_result = database.collection::<Container>(DBCollection::CONTAINERS.to_string().as_str()).find_one(doc! {"_id": object_id}, None).await.unwrap().unwrap();
-    println!("parts:{:#?}", parts);
-    println!("uri:{:#?}", body);
     //try to start the container if not starting
-    match try_start_container(container_result.container_id).await {
+    let forward_request_result = match try_start_container(container_result.container_id).await {
         Ok(_)=>{
             println!("started container");
-          
             //let _ = handshake_and_send(parts, body, container_result.public_port).await;
-            forward_request(parts, body, container_result.public_port).await;
+            let forward_result = forward_request(parts, body, container_result.public_port).await.into_response();
+            forward_result
         },
-        Err(_)=>{}
-    }
-
-    
+        Err(err)=>{
+            //cannot start container
+            println!("CANNOT START CONTAINER");
+            let res = (StatusCode::INTERNAL_SERVER_ERROR,err).into_response();
+            res
+        }
+    };
+    forward_request_result
 }
 
 pub async fn handshake_and_send(parts:Parts, body:Body, public_port:usize){
@@ -222,56 +222,76 @@ pub async fn handshake_and_send(parts:Parts, body:Body, public_port:usize){
     
     
 }
-struct ApiResponse{
 
-}
-pub async fn forward_request(parts:Parts, body:Body, public_port:usize){
-    //get the certificate
-    let mut cert_buffer: Vec<u8> = Vec::new();
-    let file_path: PathBuf = PathBuf::from(r"C:\nginx").join("localhost.crt");
-    let file_result = tokio::fs::File::open(file_path).await;
-    match file_result {
-        Ok(mut file) => {
-            let mut cert_buffer = Vec::new();
-            file.read_to_end(&mut cert_buffer).await.unwrap();
-            let certs = reqwest::Certificate::from_pem_bundle(&cert_buffer).unwrap();
-            println!("cert vector: {:#?}",certs[0]);
-            let mut client_builder = reqwest::ClientBuilder::new();
+pub async fn forward_request(parts:Parts, body:Body, public_port:usize)
+-> impl IntoResponse
+{
+    
+    let mut forward_attempt = 1;
+    let time = std::time::SystemTime::now();
+    let current_time = time.duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let mut attempt_time = time.duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let maximum_time_attempt_in_seconds:u64 = 3 * 1000;
+    println!("forward request");
+    let client_builder = reqwest::ClientBuilder::new();
+    let client = client_builder.use_rustls_tls().danger_accept_invalid_certs(true).build().unwrap();
+    let bytes = to_bytes(body, usize::MAX).await.unwrap();
 
-            let client = client_builder.use_rustls_tls().danger_accept_invalid_certs(true).build().unwrap();
-
-            
-            match parts.method {
-                Method::GET => {
-                println!("SENDING A GET REQUEST");
-                match client.get("https://localhost:38052/lcr/api/country")
-                //match client.get("https://www.google.com/")
-                    .send()
-                    .await {
+    let uri = parts.uri;
+    let url = format!("https://localhost:{}{}",public_port,uri);
+    println!("headers:{:#?}",parts.headers);
+    
+    loop { //try to connect till it becomes OK
+        attempt_time = time.duration_since(UNIX_EPOCH).unwrap().as_secs();
+        if attempt_time - current_time < maximum_time_attempt_in_seconds {
+            let method_result = match parts.method {
+                Method::GET => {Ok(client.get(&url).send().await)},
+                Method::DELETE => {Ok(client.delete(&url).send().await)},
+                //Method::PATCH => {Ok(client.patch(url).body(b).send().await)},
+                Method::POST => {Ok(client.post(&url).headers(parts.headers.clone()).body(bytes.clone()).send().await)},
+                //Method::PUT => {Ok(client.post(url).body(body).send().await)}
+                _ => {
+                    //unhandled method. what to return?
+                    Err((StatusCode::INTERNAL_SERVER_ERROR).into_response())
+                    
+                }
+            };
+            match method_result {
+                Ok(mr_ok) => {
+                    let mr_ok_res = match mr_ok {
                         Ok(result) => {
-                            println!("in response");
+                            let status = &result.status();
                             let res = result.text_with_charset("utf-8").await;
-                            print!("request result: {:#?}", res);
-                            
+                            return match res {
+                                Ok(res_body) => (*status,res_body).into_response(),
+                                Err(res_error) => (*status, res_error.to_string()).into_response()
+                            };
+                              
                         }
                         Err(error) => {
-                            print!("request error: {:#?}", error);
+                            println!("error{:#?}",error);
                             
+                            if error.status().is_some(){
+                                (error.status().unwrap(), error.to_string()).into_response()
+                            }else{
+                                (StatusCode::INTERNAL_SERVER_ERROR).into_response()
+                            }
                         }
-                    }
+                    };
+                },
+                Err(mr_err)=>{
+                    println!("mr:err{:#?}",mr_err)
                 }
-            _ => {
-                //unhandled method. what to return?
-                println!("unhandled request method");
-                
-            }
+            };
+        }else{
+            return (StatusCode::REQUEST_TIMEOUT).into_response()
         }
-        },
-        Err(_)=>{
-            println!("CANNOT FIND CERTIFICATE");
-            
-        }
-    };
+       
+        // if handshake_success {
+        //     return res;
+        // }else{}
+    }
     
-
+    
+        
 }
