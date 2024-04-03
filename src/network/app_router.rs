@@ -35,18 +35,14 @@ pub async fn router()->axum::Router {
 
 pub async fn active_service_discovery(request: Request<Body>) 
 -> impl IntoResponse
-{
-    println!("recieved request");
-    println!("request:{:#?}",&request);
-    
-    let (parts,body) = request.into_parts();
-    let response = match route_identifier(parts.uri.path_and_query().unwrap().to_string()).await {
+{   let uri = request.uri();
+    let response = match route_identifier( &uri.path_and_query().unwrap().to_string()).await {
         Some(docker_image) => {
             println!("{}", docker_image);
             //check instances of the load_balancer
             let load_balancer =get_load_balancer_instances(docker_image).await;
 
-            let port_forward_result = port_forward_request(load_balancer, parts, body).await;
+            let port_forward_result = port_forward_request(load_balancer, request).await;
             port_forward_result.into_response()
         },
         None => {
@@ -60,7 +56,7 @@ pub async fn active_service_discovery(request: Request<Body>)
 
 
 ///returns the Router Docker Image 
-pub async fn route_identifier(uri:String) -> Option<String>{
+pub async fn route_identifier(uri:&String) -> Option<String>{
     
     let database: &Database = DATABASE.get().unwrap();
     let collection_name = DBCollection::ROUTES.to_string();
@@ -97,12 +93,12 @@ pub async fn route_identifier(uri:String) -> Option<String>{
         return Some(container_route_matches[0].image_name.clone());
     }
     else{
-        return Some(route_resolver(container_route_matches, uri))
+        return Some(route_resolver(container_route_matches, &uri))
     }
         
 }
 ///helper function to help resolve multiple route results
-pub fn route_resolver(container_route_matches:Vec<ContainerRoute>, uri:String) -> String{
+pub fn route_resolver(container_route_matches:Vec<ContainerRoute>, uri:&String) -> String{
 
     let routes:Vec<Vec<String>> = container_route_matches.iter().map(|container_route| {
         let route:Vec<String> = container_route.address.split("/").filter(|s| s.to_owned()!="").map(String::from).collect();
@@ -133,18 +129,15 @@ pub fn route_resolver(container_route_matches:Vec<ContainerRoute>, uri:String) -
     return container_route_matches[matched_index].image_name.clone();
 }
 
-pub async fn port_forward_request(load_balancer:LoadBalancer, parts:Parts, body:Body) -> impl IntoResponse{
+pub async fn port_forward_request(load_balancer:LoadBalancer, request:Request) -> impl IntoResponse{
     let database = DATABASE.get().unwrap();
-    let container_id = route_container(load_balancer).await;
-    let object_id:ObjectId = ObjectId::from_str(container_id.as_str()).unwrap();
-    println!("{:#?}",object_id);
-    let container_result = database.collection::<Container>(DBCollection::CONTAINERS.to_string().as_str()).find_one(doc! {"_id": object_id}, None).await.unwrap().unwrap();
+    let (container_id, public_port) = route_container(load_balancer).await; //literal container id
     //try to start the container if not starting
-    let forward_request_result = match try_start_container(container_result.container_id).await {
+    let forward_request_result = match try_start_container(&container_id).await {
         Ok(_)=>{
             println!("started container");
             //let _ = handshake_and_send(parts, body, container_result.public_port).await;
-            let forward_result = forward_request(parts, body, container_result.public_port).await.into_response();
+            let forward_result = forward_request(request, &public_port).await.into_response();
             forward_result
         },
         Err(err)=>{
@@ -157,77 +150,11 @@ pub async fn port_forward_request(load_balancer:LoadBalancer, parts:Parts, body:
     forward_request_result
 }
 
-pub async fn handshake_and_send(parts:Parts, body:Body, public_port:usize){
-   
-    //open a TCP connection to the remote host
-    let url = parts.headers.get::<&str>("host").unwrap();
-    let host = parts.headers.get("host").unwrap().to_str().unwrap().split(":").collect::<Vec<&str>>()[0];
-    //let host = "192.168.254.106";
-    //let address_str = format!("https://{}:{}{}", host, public_port, parts.uri );
-    let address_str = format!("{}:{}", host, public_port);
-
-    let remote_url = url.to_str().unwrap().parse::<hyper::Uri>().unwrap();
-    
-    
-    match TcpStream::connect(address_str.clone()).await {
-        Ok(stream) =>{
-            let io = TokioIo::new(stream);
-            let (mut sender, conn) =  hyper::client::conn::http1::handshake(io).await.unwrap();
-            tokio::task::spawn(async move {
-                if let Err(err) = conn.await {
-                    println!("Connection failed: {:?}", err);
-                }
-            });
-           
-            match Uri::builder()
-            .scheme("https")
-            .authority(address_str.clone())
-            .path_and_query(parts.uri.to_string())
-            .build() {
-                Ok(uri)=>{
-                    let authority = uri.authority().unwrap().clone();
-                    println!("uri: {:#?}",uri);
-                    match Request::builder()
-                    .uri(uri.path())
-                    .method(Method::GET)
-                    .header(hyper::header::HOST, authority.as_str())
-                    .body(Empty::<Bytes>::new()) {
-                        Ok(req)=>{
-                            println!("req: {:#?}",req);
-                            println!("uri: {:#?}", uri);                  
-                            let mut res =  sender.send_request(req).await ; //sender and connection for the handshake result
-                            println!("res: {:#?}", res); //incomplete message here
-                            
-                        }
-                        Err(e)=>{
-                            println!("{:#?}",e);
-                        }
-                    }
-                    
-                },
-                Err(e)=>{println!("error: {}",e)}
-            };
-        
-            
-            
-            // Stream the body, writing each frame to stdout as it arrives
-            
-        },
-        Err(e)=>{
-            //cannot create a tcp_stream connection
-            println!("cannot create a tcp_stream_connection:{}",e);
-
-        }
-    }
-    
-    
-}
-
-pub async fn forward_request(parts:Parts, body:Body, public_port:usize)
+pub async fn forward_request(request:Request, public_port:&usize)
 -> impl IntoResponse
 {
     
-    let mut forward_attempt = 1;
+    let (parts, body) = request.into_parts();
     let time = std::time::SystemTime::now();
     let current_time = time.duration_since(UNIX_EPOCH).unwrap().as_secs();
     let mut attempt_time = time.duration_since(UNIX_EPOCH).unwrap().as_secs();
@@ -240,16 +167,16 @@ pub async fn forward_request(parts:Parts, body:Body, public_port:usize)
     let uri = parts.uri;
     let url = format!("https://localhost:{}{}",public_port,uri);
     println!("headers:{:#?}",parts.headers);
-    
+    let headers = parts.headers;
     loop { //try to connect till it becomes OK
         attempt_time = time.duration_since(UNIX_EPOCH).unwrap().as_secs();
         if attempt_time - current_time < maximum_time_attempt_in_seconds {
             let method_result = match parts.method {
-                Method::GET => {Ok(client.get(&url).send().await)},
-                Method::DELETE => {Ok(client.delete(&url).send().await)},
-                //Method::PATCH => {Ok(client.patch(url).body(b).send().await)},
-                Method::POST => {Ok(client.post(&url).headers(parts.headers.clone()).body(bytes.clone()).send().await)},
-                //Method::PUT => {Ok(client.post(url).body(body).send().await)}
+                Method::GET => {Ok(client.get(&url).headers(headers.clone()).send().await)},
+                Method::DELETE => {Ok(client.delete(&url).headers(headers.clone()).body(bytes.clone()).send().await)},
+                Method::PATCH => {Ok(client.patch(&url).headers(headers.clone()).body(bytes.clone()).send().await)},
+                Method::POST => {Ok(client.post(&url).headers(headers.clone()).body(bytes.clone()).send().await)},
+                Method::PUT => {Ok(client.post(&url).headers(headers.clone()).body(bytes.clone()).send().await)}
                 _ => {
                     //unhandled method. what to return?
                     Err((StatusCode::INTERNAL_SERVER_ERROR).into_response())
@@ -287,9 +214,6 @@ pub async fn forward_request(parts:Parts, body:Body, public_port:usize)
             return (StatusCode::REQUEST_TIMEOUT).into_response()
         }
        
-        // if handshake_success {
-        //     return res;
-        // }else{}
     }
     
     

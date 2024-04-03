@@ -87,14 +87,14 @@ pub async fn route_load_balancer(load_balancer:LoadBalancer)  {
         //create an instance of the contaer
     }
 }
-/// returns [type Option]<([type String],[type usize])> as (container_id, container_public_port)
+/// returns [type Option]<([type String],[type usize])> as (docker_container_id, container_public_port)
 pub async fn create_container_instance (docker_image:String,)
     -> Option<(String,usize)>{
-    let docker = DOCKER_CONNECTION.get().unwrap();
+  
     println!("creating container instance");
-    let docker_exist = check_if_docker_image_exist(&docker_image).await;
-    println!("docker image exist?:{}",docker_exist);
-    if  docker_exist{
+    let docker_image_exist = check_if_docker_image_exist(&docker_image).await;
+    println!("docker image exist?:{}",docker_image_exist);
+    if  docker_image_exist{
         let database = DATABASE.get().unwrap();
         let collection = database.collection::<ContainerRoute>(DBCollection::ROUTES.to_string().as_str());
         let image_find_result = collection.find_one(doc! {"image_name" : &docker_image}, None).await.unwrap().unwrap();
@@ -125,13 +125,12 @@ pub async fn create_container_instance (docker_image:String,)
         let create_container_result = docker.create_container( options, config).await.unwrap();
         let doc = ContainerInsert { 
             image: docker_image.clone(), 
-            container_id: create_container_result.id, 
+            container_id: create_container_result.id.clone(), 
             public_port: local_port.clone()
         };
-        let database = DATABASE.get().unwrap();
+        let _ = DBCollection::CONTAINERS.collection::<ContainerInsert>().await.insert_one(doc, None).await;
 
-        let insert_result: mongodb::results::InsertOneResult =database.collection::<ContainerInsert>(DBCollection::CONTAINERS.to_string().as_str()).insert_one(doc,None).await.unwrap();
-        let ret = (insert_result.inserted_id.as_object_id().unwrap().to_hex(), local_port);
+        let ret = (create_container_result.id, local_port);
         return Some(ret);
     }else{
         return None
@@ -151,36 +150,42 @@ pub async fn check_if_docker_image_exist(docker_image: &String) -> bool{
 
 }
 ///fetches the container id
-pub async fn route_container(mut load_balancer:LoadBalancer) -> String{
+pub async fn route_container(mut load_balancer:LoadBalancer) -> (String, usize){
     println!("route_container");
     let database = DATABASE.get().unwrap();
-    
+
+    //verify container instances
+    let container_ids = verify_docker_containers(&load_balancer).await;
+    println!("containerIds:{:#?}",&container_ids);
+    load_balancer.containers = container_ids.clone();
     if load_balancer.containers.len() == 0 {
         let (container_id, public_port) = create_container_instance(load_balancer.image).await.unwrap();
         load_balancer.containers.push(container_id);
         let _ = database.collection::<LoadBalancer>(DBCollection::LOAD_BALANCERS.to_string().as_str()).update_one(
             doc!{"_id": load_balancer._id}, 
-            doc!{"$set": doc! { "containers": &load_balancer.containers}}, 
+            doc!{"$set": doc! { "containers": &container_ids}}, 
             None
         ).await;
     }
 
-    
     //update the head
-    let mut head = (load_balancer.head + 1) % load_balancer.containers.len();
+    let mut head = (&load_balancer.head + 1) % &load_balancer.containers.len();
     let new_head = head as i64;
     let load_balancer_update_result = database.collection::<LoadBalancer>(DBCollection::LOAD_BALANCERS.to_string().as_str()).update_one(
-        doc!{"_id": load_balancer._id}, 
+        doc!{"_id": &load_balancer._id}, 
         doc!{"$set": doc! { "head": new_head}}, 
         None
     ).await;
-    let container = load_balancer.containers;
-    println!("containerResult:{}", &container[head.clone()]);
-    return container[head].clone();
+    let container = &load_balancer.containers;
+    let container_id = container[head].clone();
+    println!("containerResult:{}", &container_id);
+    //get container port
+    let container_ref = DBCollection::CONTAINERS.collection::<Container>().await.find_one(doc!{"container_id": container_id.clone() }, None).await.unwrap().unwrap();
+    return (container_ref.container_id, container_ref.public_port);
 }
 
 ///docker_container_id is based on docker_container_instance and not from the mongodb_container_id
-pub async fn try_start_container(docker_container_id:String)->Result<(),String>{
+pub async fn try_start_container(docker_container_id:&String)->Result<(),String>{
     let docker = DOCKER_CONNECTION.get().unwrap();
     //check if it is running
     let container_summary = docker.inspect_container(&docker_container_id, None).await.unwrap();
@@ -207,4 +212,32 @@ pub async fn try_start_container(docker_container_id:String)->Result<(),String>{
             Err(format!("Unhandled state condition for {}",docker_container_id))
         }
     }
+}
+///verifies docker containers if they exist and returns a new vector of the new container id list
+pub async fn verify_docker_containers(load_balancer:&LoadBalancer) -> Vec<String> {
+    let docker_containers = &load_balancer.containers;
+    let docker = DOCKER_CONNECTION.get().unwrap();
+    let mut container_options_filter = HashMap::new();
+    container_options_filter.insert("id".to_string(), docker_containers.clone());
+    let list_container_options = ListContainersOptions{
+        all: true,
+        filters: container_options_filter,
+        ..Default::default()
+    };
+    let result = docker.list_containers(Some(list_container_options)).await.unwrap();
+    let new_container_list = result.iter().map(|container_summary| {
+        let container_id = <Option<String> as Clone>::clone(&container_summary.id).unwrap().to_string();
+        container_id
+    }).collect::<Vec<String>>();
+
+    
+
+    if !(docker_containers.len() >= new_container_list.len()) {
+        let _ = DBCollection::LOAD_BALANCERS.collection::<LoadBalancer>().await.find_one_and_update(doc!{
+            "_id": load_balancer._id 
+        }, doc!{
+                "$set" : doc!{"containers": &new_container_list}
+        }, None).await;
+    }
+    new_container_list
 }

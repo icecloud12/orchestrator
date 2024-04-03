@@ -39,7 +39,7 @@ pub struct Container {
     pub public_port:usize,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize,Deserialize)]
 pub struct ContainerInsert {
 
     pub image:String,

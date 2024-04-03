@@ -1,5 +1,5 @@
 use std::sync::OnceLock;
-use mongodb::{options::ClientOptions, Client, Database};
+use mongodb::{options::ClientOptions, Client, Collection, Database};
 
 pub static DATABASE:OnceLock<Database> = OnceLock::new();
 
@@ -24,5 +24,15 @@ impl ToString for DBCollection {
             &Self::LOAD_BALANCERS => "load_balancers".to_string(),
             &Self::CONTAINERS => "containers".to_string(),
         }    
+    }
+}
+
+impl DBCollection {
+    pub async fn collection<T>(&self)->Collection<T>{
+        match &self {
+            &Self::ROUTES => DATABASE.get().unwrap().collection::<T>(DBCollection::ROUTES.to_string().as_str()),
+            &Self::LOAD_BALANCERS => DATABASE.get().unwrap().collection::<T>(DBCollection::LOAD_BALANCERS.to_string().as_str()),
+            &Self::CONTAINERS => DATABASE.get().unwrap().collection::<T>(DBCollection::CONTAINERS.to_string().as_str()),
+        }
     }
 }
