@@ -1,21 +1,11 @@
 
-use std::{str::FromStr, sync::Arc, time::UNIX_EPOCH};
+use std::{time::UNIX_EPOCH};
 
-use axum::{body::{self, Body, to_bytes}, extract::Request, http::request::Parts, response::IntoResponse, routing::{delete, get, patch, post, put}, RequestPartsExt, Router};
-use bollard::{auth};
-use hyper::{upgrade::Upgraded, HeaderMap, Method, Response, StatusCode, Uri, Version};
-use mongodb::{bson::{bson, doc, oid::ObjectId, Bson}, Database};
-use bytes::Bytes;
-use http_body_util::{combinators::{BoxBody, UnsyncBoxBody}, BodyExt, Empty, Full};
+use axum::{body::{self, Body, to_bytes}, extract::Request, response::IntoResponse, routing::{delete, get, patch, post, put}, Router};
+use hyper::{ Method, StatusCode};
+use mongodb::{bson::doc, Database};
 
-use hyper::service::service_fn;
-use hyper::{client::conn::http1};
-use hyper_util::rt::tokio::TokioIo;
-
-
-use tokio::{io::{self, AsyncReadExt, AsyncWriteExt as _}, net::{TcpListener, TcpStream}};
-
-use crate::{models::docker_models::{Container, LoadBalancer}, utils::{docker_utils::{get_load_balancer_instances, route_container, route_load_balancer, try_start_container}, mongodb_utils::{DBCollection, DATABASE}}};
+use crate::{models::docker_models::{Container, LoadBalancer}, utils::{docker_utils::{get_load_balancer_instances, route_container, try_start_container}, mongodb_utils::{DBCollection, DATABASE}}};
 use crate::models::docker_models::{ContainerRoute};
 
 
@@ -130,7 +120,7 @@ pub fn route_resolver(container_route_matches:Vec<ContainerRoute>, uri:&String) 
 }
 
 pub async fn port_forward_request(load_balancer:LoadBalancer, request:Request) -> impl IntoResponse{
-    let database = DATABASE.get().unwrap();
+
     let (container_id, public_port) = route_container(load_balancer).await; //literal container id
     //try to start the container if not starting
     let forward_request_result = match try_start_container(&container_id).await {
@@ -193,11 +183,8 @@ pub async fn forward_request(request:Request, public_port:&usize)
                                 Ok(res_body) => (*status,res_body).into_response(),
                                 Err(res_error) => (*status, res_error.to_string()).into_response()
                             };
-                              
                         }
                         Err(error) => {
-                            println!("error{:#?}",error);
-                            
                             if error.status().is_some(){
                                 (error.status().unwrap(), error.to_string()).into_response()
                             }else{

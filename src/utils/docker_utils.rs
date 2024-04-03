@@ -1,13 +1,9 @@
-use std::{borrow::Borrow, cell::OnceCell, collections::HashMap, default, ops::{Deref, DerefMut}, str::FromStr, sync::{Arc, OnceLock, RwLock}};
-
-use axum::{extract::{Host, Request}, response::IntoResponse, routing::Route};
-use bollard::{container::{self, Config, CreateContainerOptions, ListContainersOptions, StartContainerOptions}, image::ListImagesOptions, secret::{ContainerStateStatusEnum, ContainerSummary, HostConfig, ImageSummary, Port, PortBinding}, Docker};
-use hyper::{StatusCode};
-use mongodb::{bson::{doc, oid::ObjectId}, Database};
+use std::{collections::HashMap, sync::OnceLock };
+use bollard::{container::{self, Config, CreateContainerOptions, ListContainersOptions, StartContainerOptions}, image::ListImagesOptions, secret::{ContainerStateStatusEnum, HostConfig, ImageSummary, PortBinding}, Docker};
+use mongodb::{bson::doc};
 use rand::Rng;
-use serde::{Deserialize, Serialize};
 
-use crate::models::docker_models::{Container, ContainerInsert, ContainerRoute, LoadBalancer, LoadBalancerInsert};
+use crate::models::{docker_models::{Container, ContainerInsert, ContainerRoute, LoadBalancer, LoadBalancerInsert}, load_balancer_models::{ ActiveServiceDirectory, ACTIVE_SERVICE_DIRECTORY, LOAD_BALANCERS}};
 
 use super::mongodb_utils::{DBCollection, DATABASE};
 //balancer per image
@@ -41,52 +37,23 @@ pub async fn get_load_balancer_instances(docker_image:String) -> LoadBalancer{
 }
 
 pub async fn create_load_balancer_instance(docker_image:String) -> LoadBalancer{
-    let database = DATABASE.get().unwrap();
+   
     let doc: LoadBalancerInsert = LoadBalancerInsert{
-        image: docker_image,
+        image: docker_image.clone(),
         head: 0,
         behavior: LoadBalancerBehavior::RoundRobin.to_string(),
         containers: vec![],
     };
-    let create_result: mongodb::results::InsertOneResult = database.collection::<LoadBalancerInsert>(DBCollection::LOAD_BALANCERS.to_string().as_str()).insert_one(doc, None).await.unwrap();
+    let create_result: mongodb::results::InsertOneResult = DBCollection::LOAD_BALANCERS.collection::<LoadBalancerInsert>().await.insert_one(doc, None).await.unwrap();
 
-    let find_result = database.collection::<LoadBalancer>(DBCollection::LOAD_BALANCERS.to_string().as_str()).find_one(doc!{ "_id" : create_result.inserted_id}, None).await.unwrap().unwrap();
+    let find_result = DBCollection::LOAD_BALANCERS.collection::<LoadBalancer>().await.find_one(doc!{ "_id" : create_result.inserted_id}, None).await.unwrap().unwrap();
+    let asd = ACTIVE_SERVICE_DIRECTORY.get().unwrap();
+
+    let container_route = DBCollection::ROUTES.collection::<ContainerRoute>().await.find_one(doc!{"image_name":docker_image }, None).await.unwrap().unwrap();
+    asd.create_load_balancer(find_result._id.clone().to_hex(), LoadBalancerBehavior::RoundRobin, container_route.address).await;
     find_result
 }
-pub async fn route_load_balancer(load_balancer:LoadBalancer)  {
-    //check container of the load_balancer
-    let containers = load_balancer.containers;
-    if containers.len() > 0 {
-        //fetch the container instance
-        //todo port_forward based on container
-        //(StatusCode::OK).into_response()
-    }else{
-        //get get exposed port based from load_balancer image
-        let database = DATABASE.get().unwrap();
-        let container_route_result = database.collection::<ContainerRoute>(DBCollection::ROUTES.to_string().as_str()).find_one(doc! {
-            "image_name" : load_balancer.image.clone()
-        }, None).await.unwrap().unwrap();
-        let container_create_result  = create_container_instance(
-            load_balancer.image,
-        ).await;
-        match container_create_result {
-            Some((container_id, public_port)) =>{
-                //start container
-                let docker = DOCKER_CONNECTION.get().unwrap();
-                return match docker.start_container(container_id.as_str(), None::<StartContainerOptions<String>>).await {
-                    Ok(_)=>{
-                        //todo port forward request to the container
-                        //(StatusCode::OK).into_response()
-                    },
-                    Err(_)=>{()}
-                }
-                
-            },
-            None => ()
-        }
-        //create an instance of the contaer
-    }
-}
+
 /// returns [type Option]<([type String],[type usize])> as (docker_container_id, container_public_port)
 pub async fn create_container_instance (docker_image:String,)
     -> Option<(String,usize)>{
