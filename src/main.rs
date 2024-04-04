@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, os::windows::process, path::PathBuf, sync::Arc};
+use std::{env, net::SocketAddr, os::windows::process, path::PathBuf, sync::Arc};
 use axum::{extract::Host, handler::HandlerWithoutStateExt, response::Redirect, BoxError};
 use axum_server::{service::SendService, tls_rustls::RustlsConfig};
 use bollard::Docker;
@@ -46,8 +46,10 @@ async fn listen(){
     ).await {
     Ok(config) => {
         let router = app_router::router().await;
+        let ip = env::var("ADDRESS").unwrap().split(".").into_iter().map(|x| x.parse::<u8>().unwrap()).collect::<Vec<u8>>();
+        let socket_address = [ip[0],ip[1],ip[2],ip[3]]; 
         // run https server
-        let addr = SocketAddr::from(([127, 0, 0, 1], ports.https));
+        let addr = SocketAddr::from((socket_address, ports.https));
         axum_server::bind_rustls(addr, config)
             .serve(router.into_make_service())
             .await
