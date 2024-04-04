@@ -25,14 +25,16 @@ pub async fn router()->axum::Router {
 
 pub async fn active_service_discovery(request: Request<Body>) 
 -> impl IntoResponse
-{   let uri = request.uri();
+{   
+    println!("coppied_headers: {:#?}", request.headers().clone());
+    let uri = request.uri();
     let response = match route_identifier( &uri.path_and_query().unwrap().to_string()).await {
-        Some(docker_image) => {
-            println!("{}", docker_image);
+        Some((docker_image_id, container_path)) => {
+            
             //check instances of the load_balancer
-            let load_balancer =get_load_balancer_instances(docker_image).await;
+            let load_balancer_index =get_load_balancer_instances(docker_image_id.clone(), container_path).await;
 
-            let port_forward_result = port_forward_request(load_balancer, request).await;
+            let port_forward_result = port_forward_request(load_balancer_index, docker_image_id, request).await;
             port_forward_result.into_response()
         },
         None => {
@@ -45,8 +47,8 @@ pub async fn active_service_discovery(request: Request<Body>)
 
 
 
-///returns the Router Docker Image 
-pub async fn route_identifier(uri:&String) -> Option<String>{
+///returns the [type Option]<docker_image_id:[type String], container_path:[type String]>
+pub async fn route_identifier(uri:&String) -> Option<(String ,String)>{
     
     let database: &Database = DATABASE.get().unwrap();
     let collection_name = DBCollection::ROUTES.to_string();
@@ -80,7 +82,10 @@ pub async fn route_identifier(uri:&String) -> Option<String>{
     if container_route_matches.len() == 0 { //no matching routes
         return None
     }else if container_route_matches.len() == 1 {
-        return Some(container_route_matches[0].image_name.clone());
+        return Some(
+            (container_route_matches[0].image_name.clone(),
+            container_route_matches[0].address.clone())
+        );
     }
     else{
         return Some(route_resolver(container_route_matches, &uri))
@@ -88,7 +93,7 @@ pub async fn route_identifier(uri:&String) -> Option<String>{
         
 }
 ///helper function to help resolve multiple route results
-pub fn route_resolver(container_route_matches:Vec<ContainerRoute>, uri:&String) -> String{
+pub fn route_resolver(container_route_matches:Vec<ContainerRoute>, uri:&String) -> (String,String){
 
     let routes:Vec<Vec<String>> = container_route_matches.iter().map(|container_route| {
         let route:Vec<String> = container_route.address.split("/").filter(|s| s.to_owned()!="").map(String::from).collect();
@@ -116,12 +121,15 @@ pub fn route_resolver(container_route_matches:Vec<ContainerRoute>, uri:&String) 
             max_matches = minimun_matches
         }
     }
-    return container_route_matches[matched_index].image_name.clone();
+    return (
+        container_route_matches[matched_index].image_name.clone(),
+        container_route_matches[matched_index].address.clone()
+    );
 }
 
-pub async fn port_forward_request(load_balancer:LoadBalancer, request:Request) -> impl IntoResponse{
+pub async fn port_forward_request(load_balancer_index:usize, docker_image_id:String, request:Request) -> impl IntoResponse{
 
-    let (container_id, public_port) = route_container(load_balancer).await; //literal container id
+    let (container_id, public_port) = route_container(load_balancer_index, docker_image_id).await; //literal container id
     //try to start the container if not starting
     let forward_request_result = match try_start_container(&container_id).await {
         Ok(_)=>{
