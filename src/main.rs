@@ -4,7 +4,7 @@ use axum_server::{service::SendService, tls_rustls::RustlsConfig};
 use bollard::Docker;
 use dotenv::dotenv;
 use hyper::{StatusCode, Uri};
-use models::load_balancer_models::{ActiveServiceDirectory, ACTIVE_SERVICE_DIRECTORY};
+
 use network::app_router::{self, router};
 use utils::{docker_utils:: DOCKER_CONNECTION, mongodb_utils::DATABASE};
 mod utils;
@@ -14,7 +14,6 @@ mod models;
 async fn main() {
     dotenv().ok();
     DOCKER_CONNECTION.get_or_init(|| Docker::connect_with_local_defaults().unwrap());
-    ACTIVE_SERVICE_DIRECTORY.get_or_init(|| ActiveServiceDirectory{});
     match DATABASE.set(utils::mongodb_utils::connect().await) {
         Ok(_)=>{
             listen().await;
@@ -87,7 +86,10 @@ async fn redirect_http_to_https(ports: Ports) {
         }
     };
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], ports.http));
+    let ip = env::var("ADDRESS").unwrap().split(".").into_iter().map(|x| x.parse::<u8>().unwrap()).collect::<Vec<u8>>();
+    let socket_address = [ip[0],ip[1],ip[2],ip[3]]; 
+    // run https server
+    let addr = SocketAddr::from((socket_address, ports.http));
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     println!("listening on {}", listener.local_addr().unwrap());
     axum::serve(listener, redirect.into_make_service())

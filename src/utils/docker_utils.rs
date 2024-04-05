@@ -1,9 +1,9 @@
-use std::{collections::HashMap, sync::OnceLock };
+use std::{collections::HashMap, str::FromStr, sync::OnceLock };
 use bollard::{container::{self, Config, CreateContainerOptions, ListContainersOptions, StartContainerOptions}, image::ListImagesOptions, secret::{ContainerStateStatusEnum, HostConfig, ImageSummary, PortBinding}, Docker};
-use mongodb::{bson::doc};
+use mongodb::bson::{doc, oid::ObjectId};
 use rand::Rng;
 
-use crate::models::{docker_models::{Container, ContainerInsert, ContainerRoute, LoadBalancer, LoadBalancerInsert}, load_balancer_models::{ ActiveServiceDirectory, ACTIVE_SERVICE_DIRECTORY, LOAD_BALANCERS}};
+use crate::models::{docker_models::{self, Container, ContainerInsert, ContainerRoute, LoadBalancer, LoadBalancerInsert}, load_balancer_models::{ self, ActiveServiceDirectory, LOAD_BALANCERS}};
 
 use super::mongodb_utils::{DBCollection, DATABASE};
 //balancer per image
@@ -68,8 +68,8 @@ pub async fn create_load_balancer_instance(docker_image:String) -> usize{
 }
 
 /// returns [type Option]<([type String],[type usize])> as (docker_container_id, container_public_port)
-pub async fn create_container_instance (docker_image:&String)
-    -> Option<(String,usize)>{
+pub async fn create_container_instance (docker_image:&String, load_balancer_id:&String, mut current_containers:Vec<String>)
+    -> Option<load_balancer_models::Container>{
   
     println!("creating container instance");
     let docker_image_exist = check_if_docker_image_exist(&docker_image).await;
@@ -107,12 +107,44 @@ pub async fn create_container_instance (docker_image:&String)
             container_id: create_container_result.id.clone(), 
             public_port: local_port.clone()
         };
+        current_containers.push(create_container_result.id.clone());
+        println!("load_balancer id fiter {:#?}", &load_balancer_id);
+        println!("load_balancer container update {:#?}", &current_containers);
+        let _load_balancer_update_result = DBCollection::LOAD_BALANCERS.collection::<docker_models::LoadBalancer>().await.find_one_and_update(
+            doc!{"_id": ObjectId::from_str(&load_balancer_id.as_str()).unwrap()},
+            doc!{
+            "containers": current_containers
+        }, None).await;
         let container_insert_result = DBCollection::CONTAINERS.collection::<ContainerInsert>().await.insert_one(doc, None).await.unwrap();
         
-        let asd_container_index = ActiveServiceDirectory::create_container_instance(container_insert_result.inserted_id.as_object_id().unwrap().to_hex(), create_container_result.id.clone(), local_port).await;
-
-        let ret = (create_container_result.id, local_port);
-        return Some(ret);
+        let container = load_balancer_models::Container{
+            id: container_insert_result.inserted_id.as_object_id().unwrap().to_hex(),
+            container_id: create_container_result.id.clone(),
+            public_port: local_port,
+            last_accepted_request: None,
+            last_replied_request: None,
+        };
+        println!("created_container model");
+        //cannot unlock using mutex_code here
+        //update the loadbalancer container field using the mutex data
+        // let load_balancers_mutex = LOAD_BALANCERS.get().unwrap().lock().await;
+        // println!("load_balancer_mutex");
+        // let load_balancer = &load_balancers_mutex[load_balancer_index];
+        // let containers_mutex = load_balancer.containers.lock().await;
+        // println!("containers mutex");
+        // let mut containers = containers_mutex.clone();
+        // //and insert the new ID and save
+        // containers.push(create_container_result.id.clone());
+        // println!("load_balancer_id before update:{:#?}",&load_balancer_id);
+        // println!("containers before update :{:#?}",&containers);
+        // let _load_balancer_update_result = DBCollection::LOAD_BALANCERS.collection::<LoadBalancer>().await.find_one_and_update(doc!{
+        //     "_id" : ObjectId::parse_str(load_balancer_id).unwrap()
+        // }, doc!{
+        //     "$set": {
+        //         "containers": containers
+        //     }
+        // }, None).await;
+        return Some(container);
     }else{
         return None
     }
@@ -131,42 +163,12 @@ pub async fn check_if_docker_image_exist(docker_image: &String) -> bool{
 
 }
 ///fetches the container id
-pub async fn route_container(load_balancer_index:usize, docker_image_id:String) -> (String, usize) {
+pub async fn route_container(load_balancer_index:usize) 
+-> (String, usize) 
+{
+    ActiveServiceDirectory::validate_load_balancer_containers(load_balancer_index.clone()).await;
+    ActiveServiceDirectory::next_container(load_balancer_index.clone()).await
     
-    let load_balancers_mutex = LOAD_BALANCERS.get().unwrap();
-    let mut guard = load_balancers_mutex.lock().await;
-    let mut load_balancer = &guard[load_balancer_index];
-    let mut containers = load_balancer.containers.lock().await;
-    
-    //verify container instances
-    let container_ids = verify_docker_containers(&containers, &load_balancer.id).await;
-    
-
-    if container_ids.len() == 0 {
-        let (container_id, public_port) = create_container_instance(&docker_image_id).await.unwrap();
-        containers.push(container_id);
-        let _ = DBCollection::LOAD_BALANCERS.collection::<LoadBalancer>().await.update_one(
-            doc!{"_id": &load_balancer.id}, 
-            doc!{"$set": doc! { "containers": &container_ids}}, 
-            None
-        ).await;
-    }
-
-    //update the head of mutex load_balancer
-    let mut head = (&load_balancer.head + 1) % &containers.len();
-    let new_head = head.clone() as i64;
-    
-    let load_balancer_update_result = DBCollection::LOAD_BALANCERS.collection::<LoadBalancer>().await.update_one(
-        doc!{"_id": load_balancer.id.clone()}, 
-        doc!{"$set": doc! { "head": new_head}}, 
-        None
-    ).await;
-    
-    let container_id = containers[head].clone();
-    println!("containerResult:{}", &container_id);
-    //get container port
-    let container_ref = DBCollection::CONTAINERS.collection::<Container>().await.find_one(doc!{"container_id": container_id.clone() }, None).await.unwrap().unwrap();
-    return (container_ref.container_id, container_ref.public_port);
 }
 
 ///docker_container_id is based on docker_container_instance and not from the mongodb_container_id
@@ -199,7 +201,8 @@ pub async fn try_start_container(docker_container_id:&String)->Result<(),String>
     }
 }
 ///verifies docker containers if they exist and returns a new vector of the new container id list
-pub async fn verify_docker_containers(docker_containers:&Vec<String>, load_balancer_id:&String) -> Vec<String> {
+pub async fn verify_docker_containers(docker_containers:Vec<String>) -> Vec<String> {
+    
     let docker = DOCKER_CONNECTION.get().unwrap();
     let mut container_options_filter = HashMap::new();
     container_options_filter.insert("id".to_string(), docker_containers.clone());
@@ -213,15 +216,5 @@ pub async fn verify_docker_containers(docker_containers:&Vec<String>, load_balan
         let container_id = <Option<String> as Clone>::clone(&container_summary.id).unwrap().to_string();
         container_id
     }).collect::<Vec<String>>();
-
-    
-
-    if !(docker_containers.len() >= new_container_list.len()) {
-        let _ = DBCollection::LOAD_BALANCERS.collection::<LoadBalancer>().await.find_one_and_update(doc!{
-            "_id": load_balancer_id
-        }, doc!{
-                "$set" : doc!{"containers": &new_container_list}
-        }, None).await;
-    }
-    new_container_list
+    return new_container_list;
 }

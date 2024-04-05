@@ -34,7 +34,7 @@ pub async fn active_service_discovery(request: Request<Body>)
             //check instances of the load_balancer
             let load_balancer_index =get_load_balancer_instances(docker_image_id.clone(), container_path).await;
 
-            let port_forward_result = port_forward_request(load_balancer_index, docker_image_id, request).await;
+            let port_forward_result = port_forward_request(load_balancer_index, request).await;
             port_forward_result.into_response()
         },
         None => {
@@ -127,11 +127,11 @@ pub fn route_resolver(container_route_matches:Vec<ContainerRoute>, uri:&String) 
     );
 }
 
-pub async fn port_forward_request(load_balancer_index:usize, docker_image_id:String, request:Request) -> impl IntoResponse{
+pub async fn port_forward_request(load_balancer_index:usize, request:Request) -> impl IntoResponse{
 
-    let (container_id, public_port) = route_container(load_balancer_index, docker_image_id).await; //literal container id
+    let (docker_container_id, public_port) = route_container(load_balancer_index).await; //literal container id
     //try to start the container if not starting
-    let forward_request_result = match try_start_container(&container_id).await {
+    let forward_request_result = match try_start_container(&docker_container_id).await {
         Ok(_)=>{
             println!("started container");
             //let _ = handshake_and_send(parts, body, container_result.public_port).await;
@@ -178,7 +178,6 @@ pub async fn forward_request(request:Request, public_port:&usize)
                 _ => {
                     //unhandled method. what to return?
                     Err((StatusCode::INTERNAL_SERVER_ERROR).into_response())
-                    
                 }
             };
             match method_result {
@@ -207,10 +206,6 @@ pub async fn forward_request(request:Request, public_port:&usize)
             };
         }else{
             return (StatusCode::REQUEST_TIMEOUT).into_response()
-        }
-       
+        }  
     }
-    
-    
-        
 }
