@@ -225,5 +225,6 @@ pub async fn verify_docker_containers(docker_containers:Vec<String>) -> Vec<Stri
         let container_id = <Option<String> as Clone>::clone(&container_summary.id).unwrap().to_string();
         container_id
     }).collect::<Vec<String>>();
+    ActiveServiceDirectory::create_container_instances(&new_container_list).await;
     return new_container_list;
 }
