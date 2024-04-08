@@ -1,4 +1,4 @@
-use std::{ops::Deref, str::FromStr, sync::{Arc, OnceLock}, thread::current};
+use std::{collections::HashMap, hash::Hash, ops::Deref, str::FromStr, sync::{Arc, OnceLock}, thread::current};
 
 
 use mongodb::bson::{doc, oid::ObjectId};
@@ -27,65 +27,65 @@ pub struct Container {
 }
 
 
-pub static LOAD_BALANCERS:OnceLock<Arc<Mutex<Vec<LoadBalancer>>>> = OnceLock::new();
+pub static LOAD_BALANCERS:OnceLock<Arc<Mutex<HashMap<String, LoadBalancer>>>> = OnceLock::new();
 pub static CONTAINERS:OnceLock<Arc<Mutex<Vec<Container>>>> = OnceLock::new();
 #[derive(Debug)]
 pub struct ActiveServiceDirectory {}
 
 impl ActiveServiceDirectory{
-    /// returns index of type [type usize] of the generated load_balancer
-    pub async fn create_load_balancer(id:String, address:String, behavior: LoadBalancerBehavior, containers:Vec<String>)-> usize{
-        let mutex = LOAD_BALANCERS.get_or_init(|| Arc::new(Mutex::new(Vec::new())));
-        
+    /// returns index of type [type String] of the generated load_balancer
+    pub async fn create_load_balancer(id:String, address:String, behavior: LoadBalancerBehavior, containers:Vec<String>)-> String{
+        let mutex = LOAD_BALANCERS.get_or_init(|| Arc::new(Mutex::new(HashMap::new())));
         let new_load_balancer = LoadBalancer{
             id, //mongo_db_reference
-            address,
+            address: address.clone(),
             head:Arc::new(Mutex::new(0)),
             behavior,
             containers : Arc::new(Mutex::new(containers)), //docker_container_id
             validated: Arc::new(Mutex::new(false))
         };
         let mut guard = mutex.lock().await;
-        guard.push(new_load_balancer);
-        guard.len() - 1
+        guard.insert(address.clone(), new_load_balancer);
+        println!("Created a new load balancer for {}", &address);
+        address
     }
 
-    pub async fn get_load_balancer_index(container_address:String) -> Option<usize>{
-        let mutex = LOAD_BALANCERS.get_or_init(|| Arc::new(Mutex::new(Vec::new())));
-        let mut load_balancer_index:Option<usize> = None;
+    pub async fn get_load_balancer_key(container_address:String) -> Option<String>{
+        let mutex = LOAD_BALANCERS.get_or_init(|| Arc::new(Mutex::new(HashMap::new())));
+        let mut load_balancer_index:Option<String> = None;
         let mut guard = mutex.lock().await;
-        for (index,load_balancer) in guard.iter().enumerate() {
-            if load_balancer.address == container_address { //there is only 1 instance
-                load_balancer_index = Some(index);
+        for (load_balancer_key,load_balancer_val) in guard.iter() {
+            if load_balancer_val.address == container_address { //there is only 1 instance
+                load_balancer_index = Some(load_balancer_key.clone());
             }
         }
         load_balancer_index
     }
+
+    
     ///a helper function that validates load_balancer_state
     /// also loads data from the database as a way to restore state
-    pub async fn validate_load_balancer_containers(load_balancer_index:usize){
+    pub async fn validate_load_balancer_containers(load_balancer_key:String){
         
         let load_balancer_mutex = LOAD_BALANCERS.get().unwrap();
         let mut guard = load_balancer_mutex.lock().await;
-        let current_load_balancer = &guard[load_balancer_index];
+        let current_load_balancer = &guard.get(&load_balancer_key).unwrap();
         let mut is_validated_guard = current_load_balancer.validated.lock().await;
         if *is_validated_guard == false {
-
+            println!("Attempting to validate lb:{}", load_balancer_key);
             let load_balancer_id:ObjectId = ObjectId::from_str(current_load_balancer.id.as_str()).unwrap() ;
             let mongo_lb_entry = DBCollection::LOAD_BALANCERS.collection::<docker_models::LoadBalancer>().await.find_one(doc!{
                 "_id": load_balancer_id 
             }, None).await.unwrap().unwrap();
-            println!("mongo_lb_entry.containers{:#?}", &mongo_lb_entry.containers);
             let containers = mongo_lb_entry.containers;
             let verified_containers = verify_docker_containers(containers.clone()).await;
             let mut container_guard = current_load_balancer.containers.lock().await;
-            println!("verified containers {:#?}", &verified_containers);
             DBCollection::LOAD_BALANCERS.collection::<docker_models::LoadBalancer>().await.find_one_and_update(doc!{
                 "_id" : ObjectId::from_str(&mongo_lb_entry._id.to_hex()).unwrap()
             }, doc!{
                 "$set": {"containers" : &verified_containers}
             }, None).await.unwrap().unwrap();
-
+            *is_validated_guard = true;
             *container_guard = verified_containers;
         }
     }
@@ -105,10 +105,10 @@ impl ActiveServiceDirectory{
     //     mutex.len() - 1
     // }
 
-    pub async fn next_container(load_balancer_index:usize)->(String, usize){
+    pub async fn next_container(load_balancer_key:String)->(String, usize){
         //check if there is atleast 1 active container
-        let load_balancer_mutex = LOAD_BALANCERS.get().unwrap();
-        let current_load_balancer = &load_balancer_mutex.lock().await[load_balancer_index.clone()];
+        let load_balancer_mutex = LOAD_BALANCERS.get().unwrap().lock().await;
+        let current_load_balancer = &load_balancer_mutex.get(&load_balancer_key.clone()).unwrap();
         let mut current_containers = current_load_balancer.containers.lock().await;
         println!("currentContainers :{:#?}", current_containers);
         if current_containers.len() == 0 {
@@ -139,7 +139,6 @@ impl ActiveServiceDirectory{
             }
             
         }
-
         //modify head
         let mut head_mutex = current_load_balancer.head.lock().await;
         *head_mutex = (*head_mutex + 1 ) % current_containers.len();

@@ -22,9 +22,10 @@ impl ToString for LoadBalancerBehavior {
 }
 
 /// returns index of load balancer
-pub async fn get_load_balancer_instances(docker_image:String, container_address:String) -> usize{
+pub async fn get_load_balancer_instances(docker_image:String, container_address:String) -> String{
     //check local records
-    match ActiveServiceDirectory::get_load_balancer_index(container_address.clone()).await {
+
+    match ActiveServiceDirectory::get_load_balancer_key(container_address.clone()).await {
         Some(index)=>{
             return index;
         },
@@ -48,8 +49,8 @@ pub async fn get_load_balancer_instances(docker_image:String, container_address:
 
     
 }
-
-pub async fn create_load_balancer_instance(docker_image:String) -> usize{
+///returns load_balancer_key : [type String]
+pub async fn create_load_balancer_instance(docker_image:String) -> String{
    
     let doc: LoadBalancerInsert = LoadBalancerInsert{
         image: docker_image.clone(),
@@ -163,11 +164,11 @@ pub async fn check_if_docker_image_exist(docker_image: &String) -> bool{
 
 }
 ///fetches the container id
-pub async fn route_container(load_balancer_index:usize) 
+pub async fn route_container(load_balancer_string:String) 
 -> (String, usize) 
 {
-    ActiveServiceDirectory::validate_load_balancer_containers(load_balancer_index.clone()).await;
-    ActiveServiceDirectory::next_container(load_balancer_index.clone()).await
+    ActiveServiceDirectory::validate_load_balancer_containers(load_balancer_string.clone()).await;
+    ActiveServiceDirectory::next_container(load_balancer_string.clone()).await
     
 }
 
