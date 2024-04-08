@@ -176,30 +176,38 @@ pub async fn route_container(load_balancer_string:String)
 pub async fn try_start_container(docker_container_id:&String)->Result<(),String>{
     let docker = DOCKER_CONNECTION.get().unwrap();
     //check if it is running
-    let container_summary = docker.inspect_container(&docker_container_id, None).await.unwrap();
-    
-    match container_summary.state.unwrap().status.unwrap() {
+    let container_summary_result = docker.inspect_container(&docker_container_id, None).await;
+    match container_summary_result{
+        Ok(container_summary)=>{
+            match container_summary.state.unwrap().status.unwrap() {
         
-        ContainerStateStatusEnum::RUNNING => {Ok(())},
-        ContainerStateStatusEnum::CREATED => {
-            let start_docker_result = docker.start_container(&docker_container_id, None::<StartContainerOptions<String>>).await;
-            match  start_docker_result{
-                Ok(_)=>{ Ok(())},
-                Err(_) => {Err(format!("Cannot start container {}",docker_container_id))}
+                ContainerStateStatusEnum::RUNNING => {Ok(())},
+                ContainerStateStatusEnum::CREATED => {
+                    let start_docker_result = docker.start_container(&docker_container_id, None::<StartContainerOptions<String>>).await;
+                    match  start_docker_result{
+                        Ok(_)=>{ Ok(())},
+                        Err(_) => {Err(format!("Cannot start container {}",docker_container_id))}
+                    }
+                },
+                ContainerStateStatusEnum::EXITED => {
+                    let start_docker_result = docker.start_container(&docker_container_id, None::<StartContainerOptions<String>>).await;
+                    match  start_docker_result{
+                        Ok(_)=>{ Ok(())},
+                        Err(_) => {Err(format!("Cannot start container {}",docker_container_id))}
+                    }
+                },
+        
+                _ => {
+                    Err(format!("Unhandled state condition for {}",docker_container_id))
+                }
             }
         },
-        ContainerStateStatusEnum::EXITED => {
-            let start_docker_result = docker.start_container(&docker_container_id, None::<StartContainerOptions<String>>).await;
-            match  start_docker_result{
-                Ok(_)=>{ Ok(())},
-                Err(_) => {Err(format!("Cannot start container {}",docker_container_id))}
-            }
-        },
-
-        _ => {
-            Err(format!("Unhandled state condition for {}",docker_container_id))
+        Err(_)=>{
+            
+            Err(format!("cannot inspect container of id:{}", docker_container_id))
         }
     }
+    
 }
 ///verifies docker containers if they exist and returns a new vector of the new container id list
 pub async fn verify_docker_containers(docker_containers:Vec<String>) -> Vec<String> {

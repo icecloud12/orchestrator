@@ -148,4 +148,11 @@ impl ActiveServiceDirectory{
         }, None).await.unwrap().unwrap();
         (container.container_id, container.public_port)
     }
+    pub async fn update_load_balancer_validation(load_balancer_key:String, validation_value:bool){
+        let load_balancer_mutex = LOAD_BALANCERS.get().unwrap().lock().await;
+        if let Some(load_balancer_instance) = load_balancer_mutex.get(&load_balancer_key){
+            let mut isValidated_mutex= load_balancer_instance.validated.lock().await;
+            *isValidated_mutex = validation_value;
+        }
+    }
 }

@@ -5,7 +5,7 @@ use axum::{body::{self, Body, to_bytes}, extract::Request, response::IntoRespons
 use hyper::{ Method, StatusCode};
 use mongodb::{bson::doc, Database};
 
-use crate::{models::docker_models::{Container, LoadBalancer}, utils::{docker_utils::{get_load_balancer_instances, route_container, try_start_container}, mongodb_utils::{DBCollection, DATABASE}}};
+use crate::{models::{docker_models::{Container, LoadBalancer}, load_balancer_models::ActiveServiceDirectory}, utils::{docker_utils::{get_load_balancer_instances, route_container, try_start_container}, mongodb_utils::{DBCollection, DATABASE}}};
 use crate::models::docker_models::{ContainerRoute};
 
 
@@ -127,18 +127,19 @@ pub fn route_resolver(container_route_matches:Vec<ContainerRoute>, uri:&String) 
 
 pub async fn port_forward_request(load_balancer_key:String, request:Request) -> impl IntoResponse{
 
-    let (docker_container_id, public_port) = route_container(load_balancer_key).await; //literal container id
+    let (docker_container_id, public_port) = route_container(load_balancer_key.clone()).await; //literal container id
     //try to start the container if not starting
     let forward_request_result = match try_start_container(&docker_container_id).await {
         Ok(_)=>{
-            println!("started container");
+            println!("[PROCESS] Started container {}", &docker_container_id);
             //let _ = handshake_and_send(parts, body, container_result.public_port).await;
             let forward_result = forward_request(request, &public_port).await.into_response();
             forward_result
         },
         Err(err)=>{
             //cannot start container
-            println!("CANNOT START CONTAINER");
+            println!("[ERROR] Unable to start container: {}", &load_balancer_key);
+            ActiveServiceDirectory::update_load_balancer_validation(load_balancer_key.clone(), false).await;
             let res = (StatusCode::INTERNAL_SERVER_ERROR,err).into_response();
             res
         }
