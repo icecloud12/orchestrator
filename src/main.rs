@@ -1,11 +1,11 @@
-use std::{env, net::SocketAddr, os::windows::process, path::PathBuf, sync::Arc};
+use std::{env, net::SocketAddr, path::PathBuf};
 use axum::{extract::Host, handler::HandlerWithoutStateExt, response::Redirect, BoxError};
-use axum_server::{service::SendService, tls_rustls::RustlsConfig};
+use axum_server::{tls_rustls::RustlsConfig};
 use bollard::Docker;
 use dotenv::dotenv;
 use hyper::{StatusCode, Uri};
 
-use network::app_router::{self, router};
+use network::app_router;
 use utils::{docker_utils:: DOCKER_CONNECTION, mongodb_utils::DATABASE};
 mod utils;
 mod network;

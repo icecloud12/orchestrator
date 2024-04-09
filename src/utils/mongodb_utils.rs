@@ -12,16 +12,18 @@ pub async fn connect()-> Database{
 }
 
 pub enum DBCollection {
+    IMAGES,
     ROUTES,
-    LOAD_BALANCERS,
+    LOADBALANCERS,
     CONTAINERS,
 }
 
 impl ToString for DBCollection {
     fn to_string(&self) -> String {
         match &self {
+            &Self::IMAGES => "images".to_string(),
             &Self::ROUTES => "routes".to_string(),
-            &Self::LOAD_BALANCERS => "load_balancers".to_string(),
+            &Self::LOADBALANCERS => "load_balancers".to_string(),
             &Self::CONTAINERS => "containers".to_string(),
         }    
     }
@@ -30,8 +32,9 @@ impl ToString for DBCollection {
 impl DBCollection {
     pub async fn collection<T>(&self)->Collection<T>{
         match &self {
+            &Self::IMAGES => DATABASE.get().unwrap().collection::<T>(DBCollection::IMAGES.to_string().as_str()),
             &Self::ROUTES => DATABASE.get().unwrap().collection::<T>(DBCollection::ROUTES.to_string().as_str()),
-            &Self::LOAD_BALANCERS => DATABASE.get().unwrap().collection::<T>(DBCollection::LOAD_BALANCERS.to_string().as_str()),
+            &Self::LOADBALANCERS => DATABASE.get().unwrap().collection::<T>(DBCollection::LOADBALANCERS.to_string().as_str()),
             &Self::CONTAINERS => DATABASE.get().unwrap().collection::<T>(DBCollection::CONTAINERS.to_string().as_str()),
         }
     }

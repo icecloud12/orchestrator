@@ -1,11 +1,11 @@
 use std::{collections::HashMap, str::FromStr, sync::OnceLock };
-use bollard::{container::{self, Config, CreateContainerOptions, ListContainersOptions, StartContainerOptions}, image::ListImagesOptions, secret::{ContainerStateStatusEnum, HostConfig, ImageSummary, PortBinding}, Docker};
+use bollard::{container::{Config, CreateContainerOptions, ListContainersOptions, StartContainerOptions}, image::ListImagesOptions, secret::{ContainerStateStatusEnum, HostConfig, ImageSummary, PortBinding}, Docker};
 use mongodb::bson::{doc, oid::ObjectId};
 use rand::Rng;
 
-use crate::models::{docker_models::{self, Container, ContainerInsert, ContainerRoute, LoadBalancer, LoadBalancerInsert}, load_balancer_models::{ self, ActiveServiceDirectory, LOAD_BALANCERS}};
+use crate::models::{docker_models::{self, ContainerInsert, Route, Image, LoadBalancer, LoadBalancerInsert}, load_balancer_models::{ self, ActiveServiceDirectory}};
 
-use super::mongodb_utils::{DBCollection, DATABASE};
+use super::mongodb_utils::DBCollection;
 //balancer per image
 pub static DOCKER_CONNECTION:OnceLock<Docker> = OnceLock::new();
 
@@ -22,7 +22,7 @@ impl ToString for LoadBalancerBehavior {
 }
 
 /// returns index of load balancer
-pub async fn get_load_balancer_instances(docker_image:String, container_address:String) -> String{
+pub async fn get_load_balancer_instances(mongo_image_id:ObjectId, container_address:String) -> String{
     //check local records
 
     match ActiveServiceDirectory::get_load_balancer_key(container_address.clone()).await {
@@ -31,15 +31,15 @@ pub async fn get_load_balancer_instances(docker_image:String, container_address:
         },
         None =>{
             //perform a database lookup for a load_balancer
-            let load_balancer_result = DBCollection::LOAD_BALANCERS.collection::<LoadBalancer>().await.find_one(doc!{"image" : docker_image.clone()}, None).await.unwrap();
+            let load_balancer_result = DBCollection::LOADBALANCERS.collection::<LoadBalancer>().await.find_one(doc!{"mongo_image_reference" : mongo_image_id.clone()}, None).await.unwrap();
             match load_balancer_result {
                 Some(load_balancer) => {
                     //there is an instance of the load balancer and shape of past instance
-                    let index = ActiveServiceDirectory::create_load_balancer(load_balancer._id.to_hex(), container_address, LoadBalancerBehavior::RoundRobin, load_balancer.containers).await;
+                    let index = ActiveServiceDirectory::create_load_balancer(load_balancer._id.to_hex(), container_address, LoadBalancerBehavior::RoundRobin, load_balancer.containers, Some(false)).await;
                     return index;
                 },
                 None => {
-                    return  create_load_balancer_instance(docker_image).await
+                    return  create_load_balancer_instance(mongo_image_id, container_address).await
                 }
             }
         }
@@ -50,35 +50,33 @@ pub async fn get_load_balancer_instances(docker_image:String, container_address:
     
 }
 ///returns load_balancer_key : [type String]
-pub async fn create_load_balancer_instance(docker_image:String) -> String{
+pub async fn create_load_balancer_instance(mongo_image_id:ObjectId, container_address:String) -> String{
    
     let doc: LoadBalancerInsert = LoadBalancerInsert{
-        image: docker_image.clone(),
+        mongo_image_reference: mongo_image_id.clone(),
         head: 0,
         behavior: LoadBalancerBehavior::RoundRobin.to_string(),
         containers: vec![],
     };
-    let create_result: mongodb::results::InsertOneResult = DBCollection::LOAD_BALANCERS.collection::<LoadBalancerInsert>().await.insert_one(doc, None).await.unwrap();
-
-    let find_result = DBCollection::LOAD_BALANCERS.collection::<LoadBalancer>().await.find_one(doc!{ "_id" : create_result.inserted_id}, None).await.unwrap().unwrap();
-    
-    let container_route = DBCollection::ROUTES.collection::<ContainerRoute>().await.find_one(doc!{"image_name":docker_image }, None).await.unwrap().unwrap();
-    
-    ActiveServiceDirectory::create_load_balancer(find_result._id.clone().to_hex(), container_route.address, LoadBalancerBehavior::RoundRobin, vec![]).await
+    let create_result: mongodb::results::InsertOneResult = DBCollection::LOADBALANCERS.collection::<LoadBalancerInsert>().await.insert_one(doc, None).await.unwrap();
+    ActiveServiceDirectory::create_load_balancer(create_result.inserted_id.as_object_id().unwrap().to_hex(), container_address, LoadBalancerBehavior::RoundRobin, vec![], Some(false)).await
     
 }
 
 /// returns [type Option]<([type String],[type usize])> as (docker_container_id, container_public_port)
-pub async fn create_container_instance (docker_image:&String, load_balancer_id:&String, mut current_containers:Vec<String>)
+pub async fn create_container_instance (mongo_image:&ObjectId, load_balancer_id:&String, mut current_containers:Vec<String>)
     -> Option<load_balancer_models::Container>{
   
-    println!("creating container instance");
+    let docker_image = DBCollection::IMAGES.collection::<Image>().await.find_one(doc!{
+        "_id": mongo_image
+    }, None).await.unwrap().unwrap().docker_image_id;
     let docker_image_exist = check_if_docker_image_exist(&docker_image).await;
-    println!("docker image exist?:{}",docker_image_exist);
+    println!("[PROCESS] Creating container instance with image{}",&docker_image);
+    
     if  docker_image_exist{
         
-        let image_find_result = DBCollection::ROUTES.collection::<ContainerRoute>().await.find_one(doc! {"image_name" : &docker_image}, None).await.unwrap().unwrap();
-        let container_port = image_find_result.exposed_port;
+        let route_find_result = DBCollection::ROUTES.collection::<Route>().await.find_one(doc! {"mongo_image" : &mongo_image}, None).await.unwrap().unwrap();
+        let container_port = route_find_result.exposed_port;
 
         let starting_port = std::env::var("STARTING_PORT").unwrap().parse::<usize>().unwrap();
 
@@ -102,51 +100,41 @@ pub async fn create_container_instance (docker_image:&String, load_balancer_id:&
             host_config: Some(host_config),
             ..Default::default()
         };
-        let create_container_result = docker.create_container( options, config).await.unwrap();
-        let doc = ContainerInsert { 
-            image: docker_image.clone(), 
-            container_id: create_container_result.id.clone(), 
-            public_port: local_port.clone()
-        };
-        current_containers.push(create_container_result.id.clone());
-        println!("load_balancer id fiter {:#?}", &load_balancer_id);
-        println!("load_balancer container update {:#?}", &current_containers);
-        let _load_balancer_update_result = DBCollection::LOAD_BALANCERS.collection::<docker_models::LoadBalancer>().await.find_one_and_update(
-            doc!{"_id": ObjectId::from_str(&load_balancer_id.as_str()).unwrap()},
-            doc!{
-            "containers": current_containers
-        }, None).await;
-        let container_insert_result = DBCollection::CONTAINERS.collection::<ContainerInsert>().await.insert_one(doc, None).await.unwrap();
+        let image_result = DBCollection::IMAGES.collection::<Image>().await.find_one(doc!{
+            "docker_image_id": docker_image
+        }, None).await.unwrap();
+        match image_result {
+            Some(image)=>{
+                let create_container_result = docker.create_container( options, config).await.unwrap();
+                let doc = ContainerInsert { 
+                    mongo_image_reference: image._id.clone(), 
+                    container_id: create_container_result.id.clone(), 
+                    public_port: local_port.clone()
+                };
+                current_containers.push(create_container_result.id.clone());
+                let _load_balancer_update_result = DBCollection::LOADBALANCERS.collection::<docker_models::LoadBalancer>().await.find_one_and_update(
+                    doc!{"_id": ObjectId::from_str(&load_balancer_id.as_str()).unwrap()},
+                    doc!{
+                    "containers": current_containers
+                }, None).await;
+                let container_insert_result = DBCollection::CONTAINERS.collection::<ContainerInsert>().await.insert_one(doc, None).await.unwrap();
+                
+                let container = load_balancer_models::Container{
+                    id: container_insert_result.inserted_id.as_object_id().unwrap().to_hex(),
+                    container_id: create_container_result.id.clone(),
+                    public_port: local_port,
+                    last_accepted_request: None,
+                    last_replied_request: None,
+                };
+                println!("[PROCESS] created_container model");
+              
+                return Some(container);
+            },
+            None=>{None}
+        }
         
-        let container = load_balancer_models::Container{
-            id: container_insert_result.inserted_id.as_object_id().unwrap().to_hex(),
-            container_id: create_container_result.id.clone(),
-            public_port: local_port,
-            last_accepted_request: None,
-            last_replied_request: None,
-        };
-        println!("created_container model");
-        //cannot unlock using mutex_code here
-        //update the loadbalancer container field using the mutex data
-        // let load_balancers_mutex = LOAD_BALANCERS.get().unwrap().lock().await;
-        // println!("load_balancer_mutex");
-        // let load_balancer = &load_balancers_mutex[load_balancer_index];
-        // let containers_mutex = load_balancer.containers.lock().await;
-        // println!("containers mutex");
-        // let mut containers = containers_mutex.clone();
-        // //and insert the new ID and save
-        // containers.push(create_container_result.id.clone());
-        // println!("load_balancer_id before update:{:#?}",&load_balancer_id);
-        // println!("containers before update :{:#?}",&containers);
-        // let _load_balancer_update_result = DBCollection::LOAD_BALANCERS.collection::<LoadBalancer>().await.find_one_and_update(doc!{
-        //     "_id" : ObjectId::parse_str(load_balancer_id).unwrap()
-        // }, doc!{
-        //     "$set": {
-        //         "containers": containers
-        //     }
-        // }, None).await;
-        return Some(container);
     }else{
+        println!("[PROCESS] Image [{}] does not exist",&docker_image);
         return None
     }
     
