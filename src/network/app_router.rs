@@ -92,7 +92,7 @@ pub async fn route_identifier(uri:&String) -> Option<(ObjectId, String ,String)>
         //(mongo_image_id, docker_image_id, container_path) 
         return Some(
             (   
-                container_route_matches[0]._id,
+                container_route_matches[0].mongo_image,
                 docker_container_image_result.unwrap().docker_image_id, //#unwrapping error here
                 container_route_matches[0].address.clone()
             )
@@ -153,14 +153,22 @@ pub async fn port_forward_request(load_balancer_key:String, request:Request) -> 
             println!("[PROCESS] Started container {}", &docker_container_id);
             //let _ = handshake_and_send(parts, body, container_result.public_port).await;
             let forward_result = forward_request(request, &public_port).await.into_response();
-            forward_result
+            forward_result.into_response()
         },
         Err(err)=>{
             //cannot start container
             println!("[ERROR] Unable to start container: {}", &load_balancer_key);
-            ActiveServiceDirectory::update_load_balancer_validation(load_balancer_key.clone(), false).await;
-            let res = (StatusCode::INTERNAL_SERVER_ERROR,err).into_response();
-            res
+            match ActiveServiceDirectory::start_container_error_correction(&docker_container_id, &load_balancer_key).await {
+                Ok(public_port)=>{
+                    let forward_result = forward_request(request, &public_port).await.into_response();
+                    forward_result
+                },
+                Err(err_response)=>{
+                    ActiveServiceDirectory::update_load_balancer_validation(load_balancer_key,false).await;
+                    err_response.into_response()
+                }
+            }
+            
         }
     };
     forward_request_result
