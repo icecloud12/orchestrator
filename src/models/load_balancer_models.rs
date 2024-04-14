@@ -1,9 +1,12 @@
-use std::{collections::HashMap, hash::Hash, ops::Deref, str::FromStr, sync::{Arc, OnceLock}, thread::current};
+use std::{collections::HashMap, str::FromStr, sync::{Arc, OnceLock}};
 
 
+use axum::response::IntoResponse;
+use bollard::container::ListContainersOptions;
+use hyper::StatusCode;
 use mongodb::bson::{doc, oid::ObjectId};
 use tokio::sync::Mutex;
-use crate::{models::docker_models::{self, Route}, utils::{docker_utils::{self, create_container_instance, verify_docker_containers, LoadBalancerBehavior}, mongodb_utils::{self, DBCollection}}};
+use crate::{models::docker_models::{self, Route}, utils::{docker_utils::{self, create_container_instance, create_container_instance_by_load_balancer_key, try_start_container, verify_docker_containers, LoadBalancerBehavior, DOCKER_CONNECTION}, mongodb_utils::{self, DBCollection}}};
 
 
 
@@ -35,7 +38,6 @@ pub struct ActiveServiceDirectory {}
 impl ActiveServiceDirectory{
     /// returns index of type [type String] of the generated load_balancer
     pub async fn create_load_balancer(id:String, address:String, behavior: LoadBalancerBehavior, containers:Vec<String>, automatic_container_instancing:Option<bool>)-> String{
-        println!("loadbalancer_Id {}", &id);
         let mutex = LOAD_BALANCERS.get_or_init(|| Arc::new(Mutex::new(HashMap::new())));
         let new_load_balancer = LoadBalancer{
             id, //mongo_db_reference
@@ -82,6 +84,7 @@ impl ActiveServiceDirectory{
                 "_id": load_balancer_id 
             }, None).await.unwrap().unwrap();
             let containers = mongo_lb_entry.containers;
+            println!("[PROCESS] Attempting to validate containers:{:#?}", &containers);
             let verified_containers = verify_docker_containers(containers.clone()).await;
             let mut container_guard = current_load_balancer.containers.lock().await;
             DBCollection::LOADBALANCERS.collection::<docker_models::LoadBalancer>().await.find_one_and_update(doc!{
@@ -126,47 +129,34 @@ impl ActiveServiceDirectory{
 
     pub async fn next_container(load_balancer_key:String)->(String, usize){
         //check if there is atleast 1 active container
-        let load_balancer_mutex = LOAD_BALANCERS.get().unwrap().lock().await;
-        let current_load_balancer = &load_balancer_mutex.get(&load_balancer_key.clone()).unwrap();
-        let mut current_containers = current_load_balancer.containers.lock().await;
+        
+        let current_containers = ActiveServiceDirectory::get_load_balancer_containers(&load_balancer_key).await;
         println!("currentContainers :{:#?}", current_containers);
         if current_containers.len() == 0 {
-        
-            //get the image based on the path of the load_balancer;
-            let container_route = DBCollection::ROUTES.collection::<Route>().await.find_one(doc!{
-                "address" : &current_load_balancer.address
-            }, None).await.unwrap().unwrap();
-            let mongo_image = container_route.mongo_image;
-            let load_balancer_id = current_load_balancer.id.clone();
-            
-            //start a container using this image
-            let create_container_result = docker_utils::create_container_instance(&mongo_image, &load_balancer_id, current_containers.clone()).await;
-
-            //add container to the load_balancer
-            if create_container_result.is_some() {
-
-                current_containers.push(create_container_result.unwrap().container_id);
-                let insert_containers = current_containers.clone();
-                let _load_balancer_update_result = DBCollection::LOADBALANCERS.collection::<docker_models::LoadBalancer>().await.find_one_and_update(
-                    doc!{
-                        "_id": ObjectId::parse_str(&load_balancer_id.as_str()).unwrap()
-                    }, doc!{
-                        "$set" : {
-                            "containers" : insert_containers
-                        }
-                    }, None).await;
-            }
-            
+            let _create_container_result = create_container_instance_by_load_balancer_key(&load_balancer_key).await;
         }
         //modify head
+        let load_balancer_mutex = LOAD_BALANCERS.get().unwrap().lock().await;
+        let current_load_balancer = load_balancer_mutex.get(&load_balancer_key).unwrap();
         let mut head_mutex = current_load_balancer.head.lock().await;
-        *head_mutex = (*head_mutex + 1 ) % current_containers.len();
-        let next_container_docker_id = current_containers[*head_mutex].clone();
+        //using a new container count to reference the container vector just incase it changed
+        let container_mutex = current_load_balancer.containers.lock().await;
+        *head_mutex = (*head_mutex + 1 ) % container_mutex.len();
+        let next_container_docker_id = container_mutex[*head_mutex].clone();
         let container = DBCollection::CONTAINERS.collection::<docker_models::Container>().await.find_one(doc!{
             "container_id": &next_container_docker_id
         }, None).await.unwrap().unwrap();
         (container.container_id, container.public_port)
     }
+    
+    pub async fn get_load_balancer_containers(load_balancer_key:&String)->Vec<String>{
+        let load_balancer_mutex = LOAD_BALANCERS.get().unwrap().lock().await;
+        let current_load_balancer = &load_balancer_mutex.get(&load_balancer_key.clone()).unwrap();
+        let current_containers = current_load_balancer.containers.lock().await;
+        let containers = current_containers.iter().map(|x| x.clone()).collect::<Vec<String>>();
+        return containers
+    }
+    
     pub async fn update_load_balancer_validation(load_balancer_key:String, validation_value:bool){
         let load_balancer_mutex = LOAD_BALANCERS.get().unwrap().lock().await;
         if let Some(load_balancer_instance) = load_balancer_mutex.get(&load_balancer_key){
@@ -174,4 +164,63 @@ impl ActiveServiceDirectory{
             *isValidated_mutex = validation_value;
         }
     }
+
+    pub async fn remove_load_balancer_container(docker_container_id: &String, load_balancer_key:&String){
+
+        let new_containers = docker_utils::remove_container_instance(load_balancer_key, docker_container_id).await;
+
+        let load_balancer_mutex = LOAD_BALANCERS.get().unwrap().lock().await;
+        match load_balancer_mutex.get(load_balancer_key) {
+           Some( load_balancer )=>{
+                let mut containers_mutex = load_balancer.containers.lock().await;
+                *containers_mutex = new_containers;
+                println!("[PROCESS] Updated loadbalancer containers in internal memory")
+           },
+           None=>{println!("[PROCESS] Cannot remove non-existing load-balancer: {}", &load_balancer_key);} 
+        }
+    }
+
+    pub async fn start_container_error_correction(docker_container_id: &String, load_balancer_key:&String)
+    ->Result< usize,impl IntoResponse>
+    {
+
+        println!("[PROCESS] Checking if docker container exists");
+        let mut container_options_filter = HashMap::new();
+        container_options_filter.insert("id".to_string(), vec![docker_container_id.clone()]);
+
+        let list_container_options = ListContainersOptions {
+            all: true,
+            filters: container_options_filter,
+            ..Default::default()
+        };
+        let docker = DOCKER_CONNECTION.get().unwrap();
+        let container_list = docker.list_containers(Some(list_container_options)).await.unwrap();
+        if container_list.len() > 0 {
+            println!("[PROCESS] Container exists but cannot be started");
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, "Cannot create a connection to the destination").into_response())
+        }else{ //cannot find container
+            ActiveServiceDirectory::remove_load_balancer_container(docker_container_id, load_balancer_key).await;
+            
+            let created_container = docker_utils::create_container_instance_by_load_balancer_key(load_balancer_key).await;
+            match created_container {
+                Some(container) =>{
+                    match try_start_container(&container.container_id).await {
+                        Ok(_)=>{
+                            println!("[PROCESS] New container via correction started");
+                            Ok(container.public_port)
+                        },
+                        Err(err_string)=>{
+                            println!("[ERROR] {}", err_string);
+                            Err((StatusCode::INTERNAL_SERVER_ERROR, "[ERROR] Failed to start a container inside on re-attempt").into_response())
+                        }
+                    }
+                },
+                None=>{
+                    Err((StatusCode::INTERNAL_SERVER_ERROR, "[ERROR] Failed to create a container instance").into_response())
+                }
+            }
+            //return(StatusCode::OK).into_response()
+        }
+    }
+
 }
