@@ -155,7 +155,7 @@ pub async fn port_forward_request(load_balancer_key:String, request:Request) -> 
             println!("[PROCESS] Started container {}", &docker_container_id);
             let _ = set_container_latest_request(&docker_container_id, &request_id).await;
             let forward_result = forward_request(request, &public_port).await.into_response();
-            let _ = set_container_latest_reply(&docker_container_id, &request_id);
+            let _ = set_container_latest_reply(&docker_container_id, &request_id).await;
             forward_result.into_response()
         },
         Err(_)=>{
