@@ -261,3 +261,23 @@ pub async fn verify_docker_containers(docker_containers:Vec<String>) -> Vec<Stri
     ActiveServiceDirectory::create_container_instances(&new_container_list).await;
     return new_container_list;
 }
+
+pub async fn set_container_latest_request(docker_container_id:&String, latest_request:&String){
+    let _ = DBCollection::CONTAINERS.collection::<docker_models::Container>().await.find_one_and_update(doc!{
+        "container_id": docker_container_id
+    }, doc!{
+        "$set" : {
+            "last_request" : Some(latest_request)
+        }
+    }, None).await;
+}
+
+pub async fn set_container_latest_reply(docker_container_id:&String, latest_reply:&String){
+    let _ = DBCollection::CONTAINERS.collection::<docker_models::Container>().await.find_one_and_update(doc!{
+        "container_id": docker_container_id,
+    }, doc!{
+        "$set" : {
+            "last_response" : Some(latest_reply)
+        }
+    }, None).await;
+}

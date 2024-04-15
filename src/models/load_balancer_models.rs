@@ -181,7 +181,7 @@ impl ActiveServiceDirectory{
     }
 
     pub async fn start_container_error_correction(docker_container_id: &String, load_balancer_key:&String)
-    ->Result< usize,impl IntoResponse>
+    ->Result< (String, usize),impl IntoResponse>
     {
 
         println!("[PROCESS] Checking if docker container exists");
@@ -207,7 +207,7 @@ impl ActiveServiceDirectory{
                     match try_start_container(&container.container_id).await {
                         Ok(_)=>{
                             println!("[PROCESS] New container via correction started");
-                            Ok(container.public_port)
+                            Ok((container.container_id, container.public_port))
                         },
                         Err(err_string)=>{
                             println!("[ERROR] {}", err_string);

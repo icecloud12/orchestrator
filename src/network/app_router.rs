@@ -5,7 +5,7 @@ use axum::{body::{Body, to_bytes}, extract::Request, response::IntoResponse, rou
 use hyper::StatusCode;
 use mongodb::{bson::{doc, oid::ObjectId}, Database};
 
-use crate::{models::{docker_models::Image, load_balancer_models::ActiveServiceDirectory}, utils::{docker_utils::{get_load_balancer_instances, route_container, try_start_container}, mongodb_utils::{DBCollection, DATABASE}}};
+use crate::{models::{docker_models::Image, load_balancer_models::ActiveServiceDirectory}, utils::{docker_utils::{get_load_balancer_instances, route_container, set_container_latest_reply, set_container_latest_request, try_start_container}, mongodb_utils::{DBCollection, DATABASE}}};
 use crate::models::docker_models::Route;
 
 
@@ -147,20 +147,27 @@ pub async fn route_resolver(container_route_matches:Vec<Route>, uri:&String) -> 
 pub async fn port_forward_request(load_balancer_key:String, request:Request) -> impl IntoResponse{
 
     let (docker_container_id, public_port) = route_container(load_balancer_key.clone()).await; //literal container id
+    //create an id for the request
+    let request_id:String = ObjectId::new().to_hex();
     //try to start the container if not starting
     let forward_request_result = match try_start_container(&docker_container_id).await {
         Ok(_)=>{
             println!("[PROCESS] Started container {}", &docker_container_id);
-            //let _ = handshake_and_send(parts, body, container_result.public_port).await;
+            let _ = set_container_latest_request(&docker_container_id, &request_id).await;
             let forward_result = forward_request(request, &public_port).await.into_response();
+            let _ = set_container_latest_reply(&docker_container_id, &request_id);
             forward_result.into_response()
         },
-        Err(err)=>{
+        Err(_)=>{
             //cannot start container
             println!("[ERROR] Unable to start container: {}", &load_balancer_key);
             match ActiveServiceDirectory::start_container_error_correction(&docker_container_id, &load_balancer_key).await {
-                Ok(public_port)=>{
+                Ok((container_id, public_port))=>{
+                    let _ = set_container_latest_request(&container_id, &request_id).await;
+
                     let forward_result = forward_request(request, &public_port).await.into_response();
+
+                    let _  = set_container_latest_reply(&container_id, &request_id).await;
                     forward_result
                 },
                 Err(err_response)=>{
@@ -168,7 +175,6 @@ pub async fn port_forward_request(load_balancer_key:String, request:Request) -> 
                     err_response.into_response()
                 }
             }
-            
         }
     };
     forward_request_result

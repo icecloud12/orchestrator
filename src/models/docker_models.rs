@@ -40,8 +40,8 @@ pub struct Container {
     pub container_id:String,
     pub mongo_image_reference:ObjectId,
     pub public_port:usize,
-    pub last_request: Option<ObjectId>,
-    pub last_response: Option<ObjectId>,
+    pub last_request: Option<String>,
+    pub last_response: Option<String>,
     pub is_detached:Option<bool>
 }
 #[derive(Serialize,Deserialize)]
