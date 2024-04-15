@@ -2,7 +2,7 @@
 use std::{time::UNIX_EPOCH};
 
 use axum::{body::{Body, to_bytes}, extract::Request, response::IntoResponse, routing::{delete, get, patch, post, put}, Router};
-use hyper::{ Method, StatusCode};
+use hyper::StatusCode;
 use mongodb::{bson::{doc, oid::ObjectId}, Database};
 
 use crate::{models::{docker_models::Image, load_balancer_models::ActiveServiceDirectory}, utils::{docker_utils::{get_load_balancer_instances, route_container, try_start_container}, mongodb_utils::{DBCollection, DATABASE}}};
@@ -187,48 +187,46 @@ pub async fn forward_request(request:Request, public_port:&usize)
     let client = client_builder.use_rustls_tls().danger_accept_invalid_certs(true).build().unwrap();
     let bytes = to_bytes(body, usize::MAX).await.unwrap();
 
-    let uri = parts.uri;
+    let uri = &parts.uri;
     let url = format!("https://localhost:{}{}",public_port,uri);
     let host = parts.headers.get("host").unwrap().clone();
     let mut headers = parts.headers.clone();
     let current_time = time.duration_since(UNIX_EPOCH).unwrap().as_secs();
-    headers.insert("X-Forwarded-For", host);
+    match headers.get("X-Forwarded-For") {
+        Some(header_value) => {
+            let mut head_value_split = header_value.to_str().unwrap().split(";").into_iter().map(
+                |a| {
+                    a.to_string().split(" ").map(|b| b.to_string()).collect::<Vec<String>>().join("")
+                }
+            ).collect::<Vec<String>>();
+            head_value_split.push(host.to_str().unwrap().to_string());
+            headers.insert("X-Forwarded-For", head_value_split.join("; ").parse().unwrap());
+        }
+        None => {
+            headers.insert("X-Forwarded-For", host);
+        }
+    }
+    //
+    
     loop { //try to connect till it becomes OK
         let attempt_time = time.duration_since(UNIX_EPOCH).unwrap().as_secs();
         if attempt_time - current_time < maximum_time_attempt_in_seconds {
-            let method_result = match parts.method {
-                Method::GET => {Ok(client.get(&url).headers(headers.clone()).send().await)},
-                Method::DELETE => {Ok(client.delete(&url).headers(headers.clone()).body(bytes.clone()).send().await)},
-                Method::PATCH => {Ok(client.patch(&url).headers(headers.clone()).body(bytes.clone()).send().await)},
-                Method::POST => {Ok(client.post(&url).headers(headers.clone()).body(bytes.clone()).send().await)},
-                Method::PUT => {Ok(client.post(&url).headers(headers.clone()).body(bytes.clone()).send().await)}
-                _ => {
-                    //unhandled method. what to return?
-                    Err((StatusCode::INTERNAL_SERVER_ERROR).into_response())
-                }
-            };
-            match method_result {
-                Ok(mr_ok) => {
-                    let _mr_ok_res = match mr_ok {
-                        Ok(result) => {
-                            let status = &result.status();
-                            let res = result.text_with_charset("utf-8").await;
-                            return match res {
-                                Ok(res_body) => (*status,res_body).into_response(),
-                                Err(res_error) => (*status, res_error.to_string()).into_response()
-                            };
-                        }
-                        Err(error) => {
-                            if error.status().is_some(){
-                                (error.status().unwrap(), error.to_string()).into_response()
-                            }else{
-                                (StatusCode::INTERNAL_SERVER_ERROR).into_response()
-                            }
-                        }
+            let request_result = client.request(parts.method.clone(), &url).headers(headers.clone()).body(bytes.clone()).send().await;
+            let _mr_ok_res = match request_result {
+                Ok(result) => {
+                    let status = &result.status();
+                    let res = result.text_with_charset("utf-8").await;
+                    return match res {
+                        Ok(res_body) => (*status,res_body).into_response(),
+                        Err(res_error) => (*status, res_error.to_string()).into_response()
                     };
-                },
-                Err(mr_err)=>{
-                    println!("mr:err{:#?}",mr_err)
+                }
+                Err(error) => {
+                    if error.status().is_some(){
+                        (error.status().unwrap(), error.to_string()).into_response()
+                    }else{
+                        (StatusCode::INTERNAL_SERVER_ERROR).into_response()
+                    }
                 }
             };
         }else{
