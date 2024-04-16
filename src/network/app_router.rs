@@ -209,8 +209,12 @@ pub async fn forward_request(request:Request, public_port:&usize)
             headers.insert("X-Forwarded-For", head_value_split.join("; ").parse().unwrap());
         }
         None => {
-            headers.insert("X-Forwarded-For", host);
+            headers.insert("X-Forwarded-For", host.clone());
         }
+    }
+
+    if headers.get("X-Real-Ip").is_none(){
+        headers.insert("X-Real-Ip", host.clone());
     }
     //
     
