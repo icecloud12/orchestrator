@@ -42,6 +42,8 @@ pub struct Container {
     pub public_port:usize,
     pub last_request: Option<String>,
     pub last_response: Option<String>,
+    pub time_requested: Option<i64>,
+    pub time_responded: Option<i64>,
     pub is_detached:Option<bool>
 }
 #[derive(Serialize,Deserialize)]

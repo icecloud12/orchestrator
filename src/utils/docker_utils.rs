@@ -1,4 +1,4 @@
-use std::{collections::HashMap, str::FromStr, sync::OnceLock };
+use std::{collections::HashMap, str::FromStr, sync::OnceLock, time::{Duration, UNIX_EPOCH} };
 use bollard::{container::{self, Config, CreateContainerOptions, ListContainersOptions, StartContainerOptions}, image::ListImagesOptions, secret::{ContainerStateStatusEnum, HostConfig, ImageSummary, PortBinding}, Docker};
 use mongodb::bson::{doc, oid::ObjectId};
 use rand::Rng;
@@ -207,6 +207,7 @@ pub async fn route_container(load_balancer_string:String)
 
 ///docker_container_id is based on docker_container_instance and not from the mongodb_container_id
 pub async fn try_start_container(docker_container_id:&String)->Result<(),String>{
+
     let docker = DOCKER_CONNECTION.get().unwrap();
     //check if it is running
     let container_summary_result = docker.inspect_container(&docker_container_id, None).await;
@@ -216,9 +217,22 @@ pub async fn try_start_container(docker_container_id:&String)->Result<(),String>
         
                 ContainerStateStatusEnum::RUNNING => {Ok(())},
                 ContainerStateStatusEnum::CREATED => {
+                    let time:i64 = std::time::SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs().try_into().unwrap();
                     let start_docker_result = docker.start_container(&docker_container_id, None::<StartContainerOptions<String>>).await;
                     match  start_docker_result{
-                        Ok(_)=>{ Ok(())},
+                        Ok(_)=>{ 
+                            let _container_update = DBCollection::CONTAINERS.collection::<docker_models::Container>().await.find_one_and_update(doc!{
+                                "container_id": docker_container_id
+                            }, doc!{
+                                "$set" : {
+                                    "last_request": None::<String>,
+                                    "last_response": None::<String>,
+                                    "time_requested": &time,
+                                    "time_responded": &time
+                                }
+                            }, None).await.unwrap().unwrap();
+                            Ok(())
+                        },
                         Err(_) => {Err(format!("Cannot start container {}",docker_container_id))}
                     }
                 },
@@ -263,21 +277,25 @@ pub async fn verify_docker_containers(docker_containers:Vec<String>) -> Vec<Stri
 }
 
 pub async fn set_container_latest_request(docker_container_id:&String, latest_request:&String){
+    let time:i64 = std::time::SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs().try_into().unwrap();
     let _ = DBCollection::CONTAINERS.collection::<docker_models::Container>().await.find_one_and_update(doc!{
         "container_id": docker_container_id
     }, doc!{
         "$set" : {
-            "last_request" : Some(latest_request)
+            "last_request" : Some(latest_request),
+            "time_requested": Some(time)
         }
     }, None).await;
 }
 
 pub async fn set_container_latest_reply(docker_container_id:&String, latest_reply:&String){
+    let time:i64 = std::time::SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs().try_into().unwrap();
     let _ = DBCollection::CONTAINERS.collection::<docker_models::Container>().await.find_one_and_update(doc!{
         "container_id": docker_container_id,
     }, doc!{
         "$set" : {
-            "last_response" : Some(latest_reply)
+            "last_response" : Some(latest_reply),
+            "time_responded": Some(time)
         }
     }, None).await;
 }
