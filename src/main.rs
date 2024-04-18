@@ -10,6 +10,7 @@ use utils::{docker_utils:: DOCKER_CONNECTION, mongodb_utils::DATABASE};
 mod utils;
 mod network;
 mod models;
+mod handlers;
 #[tokio::main]
 async fn main() {
     dotenv().ok();
