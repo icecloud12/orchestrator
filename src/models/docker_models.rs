@@ -6,11 +6,19 @@ pub struct Image {
     pub _id:ObjectId,
     pub docker_image_id:String
 }
+#[derive(Serialize)]
 pub struct ImageInsert{
     pub docker_image_id:String
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)] 
+#[derive(Serialize)]
+pub struct RouteInsert{
+    pub mongo_image:ObjectId,
+    pub address: String,
+    pub exposed_port: String
+}
+
+#[derive(Clone, Debug, Deserialize)] 
 pub struct Route {
     pub _id: ObjectId,
     pub mongo_image: ObjectId,
