@@ -7,6 +7,7 @@ edition = "2021"
 
 [dependencies]
 axum = { version = "0.7.4", features = ["http2", "multipart"] }
+axum-macros = "0.4.1"
 axum-server = { version = "0.6.0", features = ["tls-rustls"] }
 bollard = "0.16.0"
 bytes = "1.6.0"
