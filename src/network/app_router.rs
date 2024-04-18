@@ -1,18 +1,19 @@
 
 use std::{time::UNIX_EPOCH};
 
-use axum::{body::{Body, to_bytes}, extract::Request, response::IntoResponse, routing::{delete, get, patch, post, put}, Router};
+use axum::{body::{to_bytes, Body}, extract::Request, response::IntoResponse, routing::{delete, get, patch, post, put}, Json, Router};
 use hyper::StatusCode;
 use mongodb::{bson::{doc, oid::ObjectId}, Database};
 
 use crate::{models::{docker_models::Image, load_balancer_models::ActiveServiceDirectory}, utils::{docker_utils::{get_load_balancer_instances, route_container, set_container_latest_reply, set_container_latest_request, try_start_container}, mongodb_utils::{DBCollection, DATABASE}}};
 use crate::models::docker_models::Route;
-
+use crate::handlers::route_handler::add_route;
 
 pub async fn router()->axum::Router {
-    
+    let prefix = "/asd";
+
     let router = Router::new()
-        //.route("/handshake",get(test))
+        .route(format!("{prefix}/add/v1/routes", prefix = prefix).as_str(),post(add_route))
         .route("/*path",
             get(active_service_discovery)
             .patch(active_service_discovery)
@@ -244,3 +245,5 @@ pub async fn forward_request(request:Request, public_port:&usize)
         }  
     }
 }
+
+
