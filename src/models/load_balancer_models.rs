@@ -66,6 +66,11 @@ impl ActiveServiceDirectory{
         load_balancer_index
     }
 
+    pub async fn remove_load_balancer(load_balancer_key:&String) -> Option<LoadBalancer>{
+        let mut load_balancers_mutex = LOAD_BALANCERS.get().unwrap().lock().await;
+        let load_balancer_value =  load_balancers_mutex.remove(load_balancer_key);
+        return load_balancer_value; 
+    }
     
     ///a helper function that validates load_balancer_state
     /// also loads data from the database as a way to restore state
