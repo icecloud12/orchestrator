@@ -30,9 +30,6 @@ pub async fn router()->axum::Router {
 pub async fn active_service_discovery(request: Request<Body>) 
 -> impl IntoResponse
 {   
-    println!("[LOG] Request:-------------------------------" );
-    println!("{:#?}",request);
-    println!("[ENDLOG] Request:-------------------------------" );
     let uri = request.uri();
     let headers = request.headers();
 
