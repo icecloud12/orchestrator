@@ -1,9 +1,11 @@
 use std::{collections::HashMap, str::FromStr, sync::OnceLock, time::{Duration, UNIX_EPOCH} };
+use axum::response::IntoResponse;
 use bollard::{container::{self, Config, CreateContainerOptions, ListContainersOptions, StartContainerOptions}, image::ListImagesOptions, secret::{ContainerStateStatusEnum, HostConfig, ImageSummary, PortBinding}, Docker};
+use hyper::StatusCode;
 use mongodb::bson::{doc, oid::ObjectId};
 use rand::Rng;
 
-use crate::models::{docker_models::{self, ContainerInsert, Image, LoadBalancer, LoadBalancerInsert, Route}, load_balancer_models::{ self, ActiveServiceDirectory, LOAD_BALANCERS}};
+use crate::models::{docker_models::{self, ContainerInsert, Image, ImageInsert, LoadBalancer, LoadBalancerInsert, Route}, load_balancer_models::{ self, ActiveServiceDirectory, LOAD_BALANCERS}};
 
 use super::mongodb_utils::DBCollection;
 //balancer per image
@@ -127,7 +129,7 @@ pub async fn create_container_instance (mongo_image:&ObjectId, load_balancer_id:
                     last_accepted_request: None,
                     last_replied_request: None,
                 };
-                println!("[PROCESS] created_container model");
+                println!("[PROCESS] Created_container model");
               
                 return Some(container);
             },
@@ -185,6 +187,34 @@ pub async fn remove_container_instance (load_balancer_key:&String, docker_contai
     
     return containers;
 }
+
+///regsiters the docker_image reference if it does not exist
+pub async fn register_docker_image(docker_image:&String)->Result<ObjectId, impl IntoResponse>{
+    
+    if check_if_docker_image_exist(docker_image).await {
+        //check records if it's already registered in the db
+        match DBCollection::IMAGES.collection::<docker_models::Image>().await.find_one(doc!{
+            "docker_image_id": docker_image
+        }, None).await.unwrap() {
+            
+            Some(image) => {
+                return Ok(image._id);        
+            },
+            None => {
+                //image does not exist so we must register it
+                let doc_insert:ImageInsert = ImageInsert{
+                    docker_image_id: docker_image.clone()   ,
+                };
+                let image_insert_result = DBCollection::IMAGES.collection::<docker_models::ImageInsert>().await.insert_one(doc_insert, None).await.unwrap();
+                    return Ok(image_insert_result.inserted_id.as_object_id().unwrap())
+                }
+            }
+    }
+    else{
+        return Err((StatusCode::BAD_REQUEST, "[ERROR] docker_image_id provided is an invalid reference").into_response());
+    }
+}
+
 pub async fn check_if_docker_image_exist(docker_image: &String) -> bool{
     
     let docker: &Docker = DOCKER_CONNECTION.get().unwrap();
@@ -299,3 +329,4 @@ pub async fn set_container_latest_reply(docker_container_id:&String, latest_repl
         }
     }, None).await;
 }
+

@@ -11,19 +11,43 @@ pub struct ImageInsert{
     pub docker_image_id:String
 }
 
+pub enum RouteTypes {
+    STATIC,
+    CONTAINER
+}
+
+impl ToString for RouteTypes {
+    
+    fn to_string(&self) -> String {
+        match &self {
+            &Self::STATIC => "static".to_string(),
+            &Self::CONTAINER => "container".to_string()
+        } 
+    }
+}
+///exposed port will be used differently depending on route_type
+/// 
+/// static routes will use it directly as is
+/// container routes will use it as a setting for creating containers
 #[derive(Serialize)]
 pub struct RouteInsert{
-    pub mongo_image:ObjectId,
+    pub mongo_image:Option<ObjectId>,
     pub address: String,
-    pub exposed_port: String
+    pub exposed_port: String,
+    pub route_type:String,
+    pub prefix:Option<String>
 }
+
+
 
 #[derive(Clone, Debug, Deserialize)] 
 pub struct Route {
     pub _id: ObjectId,
-    pub mongo_image: ObjectId,
+    pub mongo_image: Option<ObjectId>,
     pub address: String,
     pub exposed_port: String, //exposed port portrayed in docker container for quick match
+    pub route_type:String,
+    pub prefix:Option<String>
 }
 
 #[derive(Deserialize, Serialize)]

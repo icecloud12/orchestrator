@@ -136,7 +136,6 @@ impl ActiveServiceDirectory{
         //check if there is atleast 1 active container
         
         let current_containers = ActiveServiceDirectory::get_load_balancer_containers(&load_balancer_key).await;
-        println!("currentContainers :{:#?}", current_containers);
         if current_containers.len() == 0 {
             let _create_container_result = create_container_instance_by_load_balancer_key(&load_balancer_key).await;
         }
@@ -165,8 +164,8 @@ impl ActiveServiceDirectory{
     pub async fn update_load_balancer_validation(load_balancer_key:String, validation_value:bool){
         let load_balancer_mutex = LOAD_BALANCERS.get().unwrap().lock().await;
         if let Some(load_balancer_instance) = load_balancer_mutex.get(&load_balancer_key){
-            let mut isValidated_mutex= load_balancer_instance.validated.lock().await;
-            *isValidated_mutex = validation_value;
+            let mut is_validated_mutex= load_balancer_instance.validated.lock().await;
+            *is_validated_mutex = validation_value;
         }
     }
 
