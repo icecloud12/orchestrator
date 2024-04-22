@@ -25,8 +25,8 @@ impl ToString for LoadBalancerBehavior {
 
 /// returns index of load balancer
 pub async fn get_load_balancer_instances(mongo_image_id:ObjectId, container_address:String) -> String{
+    
     //check local records
-
     match ActiveServiceDirectory::get_load_balancer_key(container_address.clone()).await {
         Some(index)=>{
             return index;
@@ -41,6 +41,7 @@ pub async fn get_load_balancer_instances(mongo_image_id:ObjectId, container_addr
                     return index;
                 },
                 None => {
+                    
                     return  create_load_balancer_instance(mongo_image_id, container_address).await
                 }
             }

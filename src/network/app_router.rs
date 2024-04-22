@@ -30,15 +30,16 @@ pub async fn router()->axum::Router {
 pub async fn active_service_discovery(request: Request<Body>) 
 -> impl IntoResponse
 {   
+    println!("[PROCESS] Request: {:#?}", request);
     let uri = request.uri();
     let headers = request.headers();
 
-    //let response = match route_identifier( &uri.path_and_query().unwrap().to_string()).await {
     let response = match  route_identifier(headers, uri).await {
         Some(RouteIdentifierResult) => {
             match RouteIdentifierResult {
                 RouteIdentifierResult::CONTAINER { mongo_image_id, docker_image_id, container_path , prefix} =>{
                 //check instances of the load_balancer
+                    println!("routeIdentifierMongo_image: {}", mongo_image_id);
                     let load_balancer_key =get_load_balancer_instances(mongo_image_id.clone(), container_path).await;
                     let port_forward_result = port_forward_request(load_balancer_key, request,prefix).await;
                     port_forward_result.into_response()        
@@ -65,7 +66,6 @@ pub enum RouteIdentifierResult {
 
 ///returns the [type Option]<mongo_image_id:[type ObjectId], docker_image_id:[type String], container_path:[type String]>
 pub async fn route_identifier(headers:&HeaderMap, uri: &Uri) -> Option<RouteIdentifierResult>{
-//pub async fn route_identifier(uri: &String) -> Option<RouteIdentifierResult>{
 
     let mut uri_string = String::from("");
 
@@ -185,9 +185,9 @@ pub async fn route_resolver(route_matches:Vec<Route>, uri:&String) -> RouteIdent
         "_id" : route_matches[matched_index].mongo_image
     }, None).await.unwrap().unwrap();
 
-    if route_matches[0].route_type == RouteTypes::CONTAINER.to_string(){
+    if route_matches[matched_index].route_type == RouteTypes::CONTAINER.to_string(){
         return RouteIdentifierResult::CONTAINER { 
-            mongo_image_id: route_matches[matched_index]._id.clone(),
+            mongo_image_id: route_matches[matched_index].mongo_image.clone().unwrap(),
             docker_image_id: docker_image_result.docker_image_id, 
             container_path: route_matches[matched_index].address.clone(),
             prefix: route_matches[matched_index].prefix.clone()
