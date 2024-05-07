@@ -1,7 +1,7 @@
 
-use std::{time::UNIX_EPOCH};
+use std::{path::PathBuf, time::UNIX_EPOCH};
 
-use axum::{body::{to_bytes, Body}, extract::{FromRequest, Request}, http::request, response::IntoResponse, routing::{delete, get, patch, post, put}, Json, Router};
+use axum::{body::{to_bytes, Body}, extract::Request, response::IntoResponse, routing::{delete, get, patch, post, put}, Json, Router};
 use hyper::{HeaderMap, StatusCode, Uri};
 use mongodb::{bson::{doc, oid::ObjectId}, Database};
 
@@ -35,17 +35,16 @@ pub async fn active_service_discovery(request: Request<Body>)
     let headers = request.headers();
 
     let response = match  route_identifier(headers, uri).await {
-        Some(RouteIdentifierResult) => {
-            match RouteIdentifierResult {
+        Some(T_RouteIdentifierResult) => {
+            match T_RouteIdentifierResult {
                 RouteIdentifierResult::CONTAINER { mongo_image_id, docker_image_id, container_path , prefix} =>{
                 //check instances of the load_balancer
-                    println!("routeIdentifierMongo_image: {}", mongo_image_id);
                     let load_balancer_key =get_load_balancer_instances(mongo_image_id.clone(), container_path).await;
-                    let port_forward_result = port_forward_request(load_balancer_key, request,prefix).await;
+                    let port_forward_result = port_forward_request(load_balancer_key, request,prefix, RouteTypes::CONTAINER.to_string() ).await;
                     port_forward_result.into_response()        
                 }
                 RouteIdentifierResult::STATIC { static_port, prefix } => {
-                    let port_forward_result = forward_request(request, &static_port.clone().parse::<usize>().unwrap(),prefix).await;
+                    let port_forward_result = forward_request(request, static_port ,prefix,RouteTypes::STATIC.to_string()).await;
                     port_forward_result.into_response()
                 },
             }
@@ -61,7 +60,7 @@ pub async fn active_service_discovery(request: Request<Body>)
 
 pub enum RouteIdentifierResult {
     CONTAINER {mongo_image_id:ObjectId, docker_image_id:String, container_path:String, prefix:Option<String>},
-    STATIC {static_port:String, prefix:Option<String>}
+    STATIC {static_port:Option<usize>, prefix:Option<String>}
 }
 
 ///returns the [type Option]<mongo_image_id:[type ObjectId], docker_image_id:[type String], container_path:[type String]>
@@ -143,7 +142,7 @@ pub async fn route_identifier(headers:&HeaderMap, uri: &Uri) -> Option<RouteIden
             };
             return Some(res);
         }else {
-            return Some (RouteIdentifierResult::STATIC { static_port: route_matches[0].exposed_port.clone(), prefix: route_matches[0].prefix.clone() });
+            return Some (RouteIdentifierResult::STATIC { static_port: Some(route_matches[0].exposed_port.clone().parse::<usize>().unwrap()), prefix: route_matches[0].prefix.clone() });
         }
     }
     else{
@@ -193,12 +192,12 @@ pub async fn route_resolver(route_matches:Vec<Route>, uri:&String) -> RouteIdent
             prefix: route_matches[matched_index].prefix.clone()
         }
     }else {
-        return RouteIdentifierResult::STATIC { static_port:route_matches[matched_index].exposed_port.clone(),prefix:route_matches[matched_index].prefix.clone() }
+        return RouteIdentifierResult::STATIC { static_port:Some(route_matches[matched_index].exposed_port.clone().parse::<usize>().unwrap()) ,prefix:route_matches[matched_index].prefix.clone() }
     }
     
 }
 
-pub async fn port_forward_request(load_balancer_key:String, request:Request, prefix: Option<String>) -> impl IntoResponse{
+pub async fn port_forward_request(load_balancer_key:String, request:Request, prefix: Option<String>, route_type:String) -> impl IntoResponse{
 
     let (docker_container_id, public_port) = route_container(load_balancer_key.clone()).await; //literal container id
     //create an id for the request
@@ -208,7 +207,7 @@ pub async fn port_forward_request(load_balancer_key:String, request:Request, pre
         Ok(_)=>{
             println!("[PROCESS] Started container {}", &docker_container_id);
             let _ = set_container_latest_request(&docker_container_id, &request_id).await;
-            let forward_result = forward_request(request, &public_port,prefix).await.into_response();
+            let forward_result = forward_request(request, Some(public_port) ,prefix, route_type).await.into_response();
             let _ = set_container_latest_reply(&docker_container_id, &request_id).await;
             forward_result.into_response()
         },
@@ -219,7 +218,7 @@ pub async fn port_forward_request(load_balancer_key:String, request:Request, pre
                 Ok((container_id, public_port))=>{
                     let _ = set_container_latest_request(&container_id, &request_id).await;
 
-                    let forward_result = forward_request(request, &public_port,prefix).await.into_response();
+                    let forward_result = forward_request(request, Some(public_port),prefix, route_type).await.into_response();
 
                     let _  = set_container_latest_reply(&container_id, &request_id).await;
                     forward_result
@@ -234,7 +233,7 @@ pub async fn port_forward_request(load_balancer_key:String, request:Request, pre
     forward_request_result
 }
 
-pub async fn forward_request(request:Request, public_port:&usize, prefix: Option<String>)
+pub async fn forward_request(request:Request, public_port:Option<usize>, prefix: Option<String>, route_type:String)
 -> impl IntoResponse
 {
     
@@ -247,65 +246,104 @@ pub async fn forward_request(request:Request, public_port:&usize, prefix: Option
     let client = client_builder.use_rustls_tls().danger_accept_invalid_certs(true).build().unwrap();
     let bytes = to_bytes(body, usize::MAX).await.unwrap();
 
-    
-    
-    //let host = parts.headers.get("host").unwrap().clone();
-    let mut headers = parts.headers.clone();
-    let uri = extract_uri(&parts.uri.to_string(), prefix);
-    let url = format!("https://localhost:{}{}",public_port,uri);
-    println!("[PROCESS] forwarding request to {}", &url );
-    
-    loop { //try to connect till it becomes OK
-        let attempt_time = std::time::SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-        if attempt_time - current_time < maximum_time_attempt_in_seconds {
-            println!("[PROCESS] current attempt time: {:#?}/{}", (attempt_time - current_time), maximum_time_attempt_in_seconds);
+    let headers = parts.headers.clone();
+    let uri = extract_uri( &parts.uri, prefix);
+    //let uri = parts.uri.path_and_query().unwrap().to_string();
+    match &route_type {
+        static_route if  RouteTypes::STATIC.to_string() == route_type => {
+            let url = if public_port.is_some(){
+                format!("https://localhost:{}{}",public_port.unwrap(),uri)
+            }else{
+                format!("https://localhost{}",uri)
+            };
+            println!("[PROCESS] forwarding request to static {}", &url );
+            //forwarding to static route
+            let attempt_time = std::time::SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
             let request_result = client.request(parts.method.clone(), &url).headers(headers.clone()).body(bytes.clone()).send().await;
             let _mr_ok_res = match request_result {
                 Ok(result) => {
+                    let response_time = std::time::SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+                    let response_diff = response_time - attempt_time;
                     let status = result.status();
                     //let bytes = result.bytes().await.unwrap();
                     let headers = result.headers().clone();
                     let body = Body::try_from(result.bytes().await.unwrap()).unwrap();
-                    
                     let status_code = StatusCode::from_u16(status.as_u16()).unwrap();
                     println!("[PROCESS] Responded");
+                    //todo insert to request db
                     return (status_code,headers,body).into_response();
                     
                 }
                 Err(error) => { //i think this is wrong
-                    println!("[PROCESS] Failed: Retrying");
+                    println!("[PROCESS] Failed to fetch to destination");
+                    return (StatusCode::BAD_GATEWAY).into_response();
                 }
             };
-        }else{
-            println!("[PROCESS] Responded");
-            return (StatusCode::REQUEST_TIMEOUT).into_response()
-        }  
-    }
+        },
+        container_route if RouteTypes::CONTAINER.to_string() == route_type => {
+            let url =  format!("https://localhost:{}{}",public_port.unwrap(),uri);
+            println!("[PROCESS] forwarding request to container {}", &url );
+            loop { //try to connect till it becomes OK
+                let attempt_time = std::time::SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+                if attempt_time - current_time < maximum_time_attempt_in_seconds {
+                    println!("[PROCESS] current attempt time: {:#?}/{}", (attempt_time - current_time), maximum_time_attempt_in_seconds);
+                    let request_result = client.request(parts.method.clone(), &url).headers(headers.clone()).body(bytes.clone()).send().await;
+                    let _mr_ok_res = match request_result {
+                        Ok(result) => {
+                            let status = result.status();
+                            //let bytes = result.bytes().await.unwrap();
+                            let headers = result.headers().clone();
+                            let body = Body::try_from(result.bytes().await.unwrap()).unwrap();
+                            
+                            let status_code = StatusCode::from_u16(status.as_u16()).unwrap();
+                            println!("[PROCESS] Responded");
+                             //todo insert to request db
+                            return (status_code,headers,body).into_response();
+                            
+                        }
+                        Err(error) => { //i think this is wrong
+                            println!("[PROCESS] Failed: Retrying");
+                        }
+                    };
+                }else{
+                    println!("[PROCESS] Responded but failed");
+                    return (StatusCode::REQUEST_TIMEOUT).into_response()
+                }  
+            }
+        },
+        _ => {
+            println!("[ERROR] Unable to handle route type of {}", route_type);
+            return (StatusCode::BAD_REQUEST).into_response();  
+        }
+    };
+    
+    
 }
 
 //
-pub fn extract_uri (uri_string:&String, prefix: Option<String>)->String {
-    let split = format!("{}:{}",std::env::var("ADDRESS").unwrap(), std::env::var("PORT").unwrap());
-    let splitted_uri = uri_string.split(&split).into_iter().map(|x| x.to_string()).collect::<Vec<String>>();
-    let mut new_uri:Option<String> = None;
-    if splitted_uri.len() == 1 {
-        new_uri = Some(splitted_uri[0].clone());
-    }else {
-        if splitted_uri.len() == 2 {
-            new_uri = Some(splitted_uri[1].clone());
-        }else{
-            let n_uri = splitted_uri[1..splitted_uri.len()-1].into_iter().map(|x|x.to_string()).collect::<Vec<String>>();
-            new_uri = Some(n_uri.join(""));
-        }
-    }
-    if prefix.is_some() {
-        let pattern = format!("/{}",prefix.unwrap().clone());
-        if new_uri.clone().unwrap().starts_with(pattern.as_str()) {
-            let a: Vec<String> = new_uri.unwrap().split(&pattern).into_iter().map(|x| x.to_string()).collect::<Vec<String>>();
-            return a[1].clone();
-        }
-        
-    }
-    return new_uri.unwrap();
+pub fn extract_uri (uri:&Uri, prefix: Option<String>)->String {
+    let new_uri = if uri.path_and_query().is_some() {
 
+        let temp = uri.path_and_query().unwrap().to_string();
+        if prefix.is_some(){
+            let prefix_t: String = prefix.unwrap();
+            if temp.starts_with(&format!("/{}", prefix_t)){
+                let split = temp.split(&format!("/{}", prefix_t)).into_iter().map(|x| x.to_string()).collect::<Vec<String>>();
+                if split.len() == 1 {
+                    split[0].clone()
+                }else if split.len() == 2{
+                    split[1].clone()
+                }else{
+                    split[0 .. split.len()-1].into_iter().map(|x|x.to_string()).collect::<Vec<String>>().join("")
+                }
+            }else{
+                temp
+            }
+        }else{
+            temp
+        }
+    }else{
+        "/".to_string()
+    };
+    new_uri
 }
