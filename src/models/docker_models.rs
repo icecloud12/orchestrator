@@ -46,7 +46,6 @@ pub struct Route {
     pub mongo_image: Option<ObjectId>,
     pub address: String,
     pub exposed_port: String, //exposed port portrayed in docker container for quick match
-    pub route_type:String,
     pub prefix:Option<String>
 }
 

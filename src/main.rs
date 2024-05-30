@@ -32,23 +32,19 @@ struct Ports {
     https: u16,
 }
 async fn listen(){
-    let ports = Ports {
-        https: 3001
-    };
 
-    //tokio::spawn(redirect_http_to_https(ports));
     match RustlsConfig::from_pem_file(
-    PathBuf::from(r"C:\nginx\")
-        .join("localhost.crt"),
-        PathBuf::from(r"C:\nginx\")
-        .join("localhost.key"),
+    PathBuf::from("./src/keys")
+        .join("orchestrator.crt"),
+        PathBuf::from("./src/keys")
+        .join("orchestrator_pem.pem"),
     ).await {
     Ok(config) => {
         let router = app_router::router().await;
         let ip = env::var("ADDRESS").unwrap().split(".").into_iter().map(|x| x.parse::<u8>().unwrap()).collect::<Vec<u8>>();
         let socket_address = [ip[0],ip[1],ip[2],ip[3]]; 
         // run https server
-        let addr = SocketAddr::from((socket_address, ports.https));
+        let addr = SocketAddr::from((socket_address, env::var("PORT").unwrap().parse::<u16>().unwrap()));
         let addr_s = &addr.to_string();
         println!("listening on {}", addr_s);
         axum_server::bind_rustls(addr, config)

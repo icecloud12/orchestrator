@@ -5,16 +5,16 @@ use axum::{body::{to_bytes, Body}, extract::Request, response::IntoResponse, rou
 use hyper::{HeaderMap, StatusCode, Uri};
 use mongodb::{bson::{doc, oid::ObjectId}, Database};
 
-use crate::{handlers::route_handler::remove_route, models::{docker_models::{Image, RouteTypes}, load_balancer_models::ActiveServiceDirectory}, utils::{docker_utils::{get_load_balancer_instances, route_container, set_container_latest_reply, set_container_latest_request, try_start_container}, mongodb_utils::{DBCollection, DATABASE}}};
+use crate::{handlers::route_handler::remove_route, models::{docker_models::{Container, Image, RouteTypes}, load_balancer_models::ActiveServiceDirectory}, utils::{docker_utils::{get_load_balancer_instances, route_container, set_container_latest_reply, set_container_latest_request, try_start_container}, mongodb_utils::{DBCollection, DATABASE}}};
 use crate::models::docker_models::Route;
 use crate::handlers::route_handler::add_route;
 
 pub async fn router()->axum::Router {
-    let prefix = "/asd";
+    let prefix = "/orchestrator";
 
     let router = Router::new()
-        .route(format!("{prefix}/v1/routes/add", prefix = prefix).as_str(),post(add_route))
-        .route(format!("{prefix}/v1/routes/remove/:id", prefix = prefix).as_str(), get(remove_route))
+        // .route(format!("{prefix}/v1/routes/add", prefix = prefix).as_str(),post(add_route))
+        // .route(format!("{prefix}/v1/routes/remove/:id", prefix = prefix).as_str(), get(remove_route))
         .route("/*path",
             get(active_service_discovery)
             .patch(active_service_discovery)
@@ -36,18 +36,25 @@ pub async fn active_service_discovery(request: Request<Body>)
 
     let response = match  route_identifier(headers, uri).await {
         Some(T_RouteIdentifierResult) => {
-            match T_RouteIdentifierResult {
-                RouteIdentifierResult::CONTAINER { mongo_image_id, docker_image_id, container_path , prefix} =>{
-                //check instances of the load_balancer
-                    let load_balancer_key =get_load_balancer_instances(mongo_image_id.clone(), container_path).await;
-                    let port_forward_result = port_forward_request(load_balancer_key, request,prefix, RouteTypes::CONTAINER.to_string() ).await;
-                    port_forward_result.into_response()        
-                }
-                RouteIdentifierResult::STATIC { static_port, prefix } => {
-                    let port_forward_result = forward_request(request, static_port ,prefix,RouteTypes::STATIC.to_string()).await;
-                    port_forward_result.into_response()
-                },
-            }
+			
+				let RouteIdentifierResult {mongo_image_id, docker_image_id, container_path , prefix} = T_RouteIdentifierResult;
+				let load_balancer_key =get_load_balancer_instances(mongo_image_id.clone(), container_path).await;
+				let port_forward_result = port_forward_request(load_balancer_key, request,prefix).await;
+				port_forward_result.into_response()        
+			
+
+            // match T_RouteIdentifierResult {
+                // RouteIdentifierResult::CONTAINER { mongo_image_id, docker_image_id, container_path , prefix} =>{
+                // //check instances of the load_balancer
+                //     let load_balancer_key =get_load_balancer_instances(mongo_image_id.clone(), container_path).await;
+                //     let port_forward_result = port_forward_request(load_balancer_key, request,prefix, RouteTypes::CONTAINER.to_string() ).await;
+                //     port_forward_result.into_response()        
+                // }
+                // RouteIdentifierResult::STATIC { static_port, prefix } => {
+                //     let port_forward_result = forward_request(request, static_port ,prefix,RouteTypes::STATIC.to_string()).await;
+                //     port_forward_result.into_response()
+                // },
+            // }
             
         },
         None => {
@@ -58,37 +65,41 @@ pub async fn active_service_discovery(request: Request<Body>)
 }
 
 
-pub enum RouteIdentifierResult {
-    CONTAINER {mongo_image_id:ObjectId, docker_image_id:String, container_path:String, prefix:Option<String>},
-    STATIC {static_port:Option<usize>, prefix:Option<String>}
+// pub enum RouteIdentifierResult {
+//     CONTAINER {mongo_image_id:ObjectId, docker_image_id:String, container_path:String, prefix:Option<String>},
+//     STATIC {static_port:Option<usize>, prefix:Option<String>}
+// }
+pub struct RouteIdentifierResult {
+	mongo_image_id:ObjectId, docker_image_id:String, container_path:String, prefix:Option<String>
 }
 
 ///returns the [type Option]<mongo_image_id:[type ObjectId], docker_image_id:[type String], container_path:[type String]>
 pub async fn route_identifier(headers:&HeaderMap, uri: &Uri) -> Option<RouteIdentifierResult>{
 
-    let mut uri_string = String::from("");
+    let mut uri_string = uri.path_and_query().clone().unwrap().to_string();
+    // }
 
 
     let sec_fetch_site = headers.get("sec-fetch-site");
     //uri_string = uri.path_and_query().clone().unwrap().to_string();
 
-    if sec_fetch_site.is_some() && sec_fetch_site.unwrap().to_str().unwrap() == "same-origin" {
-        println!("[PROCESS] Is a referrer");
-        let referrer = headers.get("referer").unwrap().to_str().unwrap().to_string();
-        let pattern = format!("{}:{}", std::env::var("ADDRESS").unwrap(), std::env::var("PORT").unwrap());
-        uri_string = referrer.split(&pattern).into_iter().map(|l| l.to_string()).collect::<Vec<String>>()[1].clone();
-        let path_query = uri.path_and_query();
-        if path_query.is_some(){
-            if(path_query.unwrap().to_string().starts_with(&uri_string)){
-                uri_string = path_query.unwrap().to_string()
-            }else{
-                uri_string = format!("{}{}",uri_string, path_query.unwrap());
-            }
-        }
+    // if sec_fetch_site.is_some() && sec_fetch_site.unwrap().to_str().unwrap() == "same-origin" {
+    //     println!("[PROCESS] Is a referrer");
+    //     let referrer = headers.get("referer").unwrap().to_str().unwrap().to_string();
+    //     let pattern = format!("{}:{}", std::env::var("ADDRESS").unwrap(), std::env::var("PORT").unwrap());
+    //     uri_string = referrer.split(&pattern).into_iter().map(|l| l.to_string()).collect::<Vec<String>>()[1].clone();
+    //     let path_query = uri.path_and_query();
+    //     if path_query.is_some(){
+    //         if(path_query.unwrap().to_string().starts_with(&uri_string)){
+    //             uri_string = path_query.unwrap().to_string()
+    //         }else{
+    //             uri_string = format!("{}{}",uri_string, path_query.unwrap());
+    //         }
+    //     }
         
-    }else{
-        uri_string = uri.path_and_query().clone().unwrap().to_string();
-    }
+    // }else{
+    //     uri_string = uri.path_and_query().clone().unwrap().to_string();
+    // }
     
     
     //uri_string = uri.clone();
@@ -128,23 +139,36 @@ pub async fn route_identifier(headers:&HeaderMap, uri: &Uri) -> Option<RouteIden
         return None
     }else if route_matches.len() == 1 {
         let current_route = &route_matches[0];
-        if current_route.route_type == RouteTypes::CONTAINER.to_string(){
-            let docker_container_image_result = DBCollection::IMAGES.collection::<Image>().await.find_one(doc!{
-                "_id" : &route_matches[0].mongo_image
-            }, None).await.unwrap();
-            //(mongo_image_id, docker_image_id, container_path)
-            let res = RouteIdentifierResult::CONTAINER{
-                mongo_image_id: current_route.mongo_image.unwrap(),
-                docker_image_id: docker_container_image_result.unwrap().docker_image_id, //#unwrapping error here
-                container_path: current_route.address.clone(),
-                prefix: current_route.prefix.clone(),
+        // if current_route.route_type == RouteTypes::CONTAINER.to_string(){
+        //     let docker_container_image_result = DBCollection::IMAGES.collection::<Image>().await.find_one(doc!{
+        //         "_id" : &route_matches[0].mongo_image
+        //     }, None).await.unwrap();
+        //     //(mongo_image_id, docker_image_id, container_path)
+        //     let res = RouteIdentifierResult::CONTAINER{
+        //         mongo_image_id: current_route.mongo_image.unwrap(),
+        //         docker_image_id: docker_container_image_result.unwrap().docker_image_id, //#unwrapping error here
+        //         container_path: current_route.address.clone(),
+        //         prefix: current_route.prefix.clone(),
                 
-            };
-            return Some(res);
-        }else {
-            return Some (RouteIdentifierResult::STATIC { static_port: Some(route_matches[0].exposed_port.clone().parse::<usize>().unwrap()), prefix: route_matches[0].prefix.clone() });
-        }
-    }
+        //     };
+        //     return Some(res);
+        // }else {
+        //     return Some (RouteIdentifierResult::STATIC { static_port: Some(route_matches[0].exposed_port.clone().parse::<usize>().unwrap()), prefix: route_matches[0].prefix.clone() });
+        // }
+		let docker_container_image_result = DBCollection::IMAGES.collection::<Image>().await.find_one(doc!{
+			"_id" : &route_matches[0].mongo_image
+		}, None).await.unwrap();
+		//(mongo_image_id, docker_image_id, container_path)
+		let res: RouteIdentifierResult = RouteIdentifierResult{
+			mongo_image_id: current_route.mongo_image.unwrap(),
+			docker_image_id: docker_container_image_result.unwrap().docker_image_id, //#unwrapping error here
+			container_path: current_route.address.clone(),
+			prefix: current_route.prefix.clone(),
+			
+		};
+		return Some(res);
+
+	}
     else{
         return Some(route_resolver(route_matches, &uri_string).await)
     }
@@ -184,20 +208,28 @@ pub async fn route_resolver(route_matches:Vec<Route>, uri:&String) -> RouteIdent
         "_id" : route_matches[matched_index].mongo_image
     }, None).await.unwrap().unwrap();
 
-    if route_matches[matched_index].route_type == RouteTypes::CONTAINER.to_string(){
-        return RouteIdentifierResult::CONTAINER { 
-            mongo_image_id: route_matches[matched_index].mongo_image.clone().unwrap(),
-            docker_image_id: docker_image_result.docker_image_id, 
-            container_path: route_matches[matched_index].address.clone(),
-            prefix: route_matches[matched_index].prefix.clone()
-        }
-    }else {
-        return RouteIdentifierResult::STATIC { static_port:Some(route_matches[matched_index].exposed_port.clone().parse::<usize>().unwrap()) ,prefix:route_matches[matched_index].prefix.clone() }
-    }
+
+	return RouteIdentifierResult{ 
+		mongo_image_id: route_matches[matched_index].mongo_image.clone().unwrap(),
+		docker_image_id: docker_image_result.docker_image_id, 
+		container_path: route_matches[matched_index].address.clone(),
+		prefix: route_matches[matched_index].prefix.clone()
+	}
+
+    // if route_matches[matched_index].route_type == RouteTypes::CONTAINER.to_string(){
+    //     return RouteIdentifierResult::CONTAINER { 
+    //         mongo_image_id: route_matches[matched_index].mongo_image.clone().unwrap(),
+    //         docker_image_id: docker_image_result.docker_image_id, 
+    //         container_path: route_matches[matched_index].address.clone(),
+    //         prefix: route_matches[matched_index].prefix.clone()
+    //     }
+    // }else {
+    //     return RouteIdentifierResult::STATIC { static_port:Some(route_matches[matched_index].exposed_port.clone().parse::<usize>().unwrap()) ,prefix:route_matches[matched_index].prefix.clone() }
+    // }
     
 }
 
-pub async fn port_forward_request(load_balancer_key:String, request:Request, prefix: Option<String>, route_type:String) -> impl IntoResponse{
+pub async fn port_forward_request(load_balancer_key:String, request:Request, prefix: Option<String>) -> impl IntoResponse{
 
     let (docker_container_id, public_port) = route_container(load_balancer_key.clone()).await; //literal container id
     //create an id for the request
@@ -207,7 +239,7 @@ pub async fn port_forward_request(load_balancer_key:String, request:Request, pre
         Ok(_)=>{
             println!("[PROCESS] Started container {}", &docker_container_id);
             let _ = set_container_latest_request(&docker_container_id, &request_id).await;
-            let forward_result = forward_request(request, Some(public_port) ,prefix, route_type).await.into_response();
+            let forward_result = forward_request(request, Some(public_port) ,prefix).await.into_response();
             let _ = set_container_latest_reply(&docker_container_id, &request_id).await;
             forward_result.into_response()
         },
@@ -218,7 +250,7 @@ pub async fn port_forward_request(load_balancer_key:String, request:Request, pre
                 Ok((container_id, public_port))=>{
                     let _ = set_container_latest_request(&container_id, &request_id).await;
 
-                    let forward_result = forward_request(request, Some(public_port),prefix, route_type).await.into_response();
+                    let forward_result = forward_request(request, Some(public_port),prefix).await.into_response();
 
                     let _  = set_container_latest_reply(&container_id, &request_id).await;
                     forward_result
@@ -233,14 +265,14 @@ pub async fn port_forward_request(load_balancer_key:String, request:Request, pre
     forward_request_result
 }
 
-pub async fn forward_request(request:Request, public_port:Option<usize>, prefix: Option<String>, route_type:String)
+pub async fn forward_request(request:Request, public_port:Option<usize>, prefix: Option<String>)
 -> impl IntoResponse
 {
     
     let (parts, body) = request.into_parts();
     let time = std::time::SystemTime::now();
     let current_time = time.duration_since(UNIX_EPOCH).unwrap().as_secs();
-    let maximum_time_attempt_in_seconds:u64 = 5;
+    let maximum_time_attempt_in_seconds:u64 = 10;
     
     let client_builder = reqwest::ClientBuilder::new();
     let client = client_builder.use_rustls_tls().danger_accept_invalid_certs(true).build().unwrap();
@@ -248,74 +280,36 @@ pub async fn forward_request(request:Request, public_port:Option<usize>, prefix:
 
     let headers = parts.headers.clone();
     let uri = extract_uri( &parts.uri, prefix);
-    //let uri = parts.uri.path_and_query().unwrap().to_string();
-    match &route_type {
-        static_route if  RouteTypes::STATIC.to_string() == route_type => {
-            let url = if public_port.is_some(){
-                format!("https://localhost:{}{}",public_port.unwrap(),uri)
-            }else{
-                format!("https://localhost{}",uri)
-            };
-            println!("[PROCESS] forwarding request to static {}", &url );
-            //forwarding to static route
-            let attempt_time = std::time::SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
-            let request_result = client.request(parts.method.clone(), &url).headers(headers.clone()).body(bytes.clone()).send().await;
-            let _mr_ok_res = match request_result {
-                Ok(result) => {
-                    let response_time = std::time::SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
-                    let response_diff = response_time - attempt_time;
-                    let status = result.status();
-                    //let bytes = result.bytes().await.unwrap();
-                    let headers = result.headers().clone();
-                    let body = Body::try_from(result.bytes().await.unwrap()).unwrap();
-                    let status_code = StatusCode::from_u16(status.as_u16()).unwrap();
-                    println!("[PROCESS] Responded");
-                    //todo insert to request db
-                    return (status_code,headers,body).into_response();
-                    
-                }
-                Err(error) => { //i think this is wrong
-                    println!("[PROCESS] Failed to fetch to destination");
-                    return (StatusCode::BAD_GATEWAY).into_response();
-                }
-            };
-        },
-        container_route if RouteTypes::CONTAINER.to_string() == route_type => {
-            let url =  format!("https://localhost:{}{}",public_port.unwrap(),uri);
-            println!("[PROCESS] forwarding request to container {}", &url );
-            loop { //try to connect till it becomes OK
-                let attempt_time = std::time::SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-                if attempt_time - current_time < maximum_time_attempt_in_seconds {
-                    println!("[PROCESS] current attempt time: {:#?}/{}", (attempt_time - current_time), maximum_time_attempt_in_seconds);
-                    let request_result = client.request(parts.method.clone(), &url).headers(headers.clone()).body(bytes.clone()).send().await;
-                    let _mr_ok_res = match request_result {
-                        Ok(result) => {
-                            let status = result.status();
-                            //let bytes = result.bytes().await.unwrap();
-                            let headers = result.headers().clone();
-                            let body = Body::try_from(result.bytes().await.unwrap()).unwrap();
-                            
-                            let status_code = StatusCode::from_u16(status.as_u16()).unwrap();
-                            println!("[PROCESS] Responded");
-                             //todo insert to request db
-                            return (status_code,headers,body).into_response();
-                            
-                        }
-                        Err(error) => { //i think this is wrong
-                            println!("[PROCESS] Failed: Retrying");
-                        }
-                    };
-                }else{
-                    println!("[PROCESS] Responded but failed");
-                    return (StatusCode::REQUEST_TIMEOUT).into_response()
-                }  
-            }
-        },
-        _ => {
-            println!("[ERROR] Unable to handle route type of {}", route_type);
-            return (StatusCode::BAD_REQUEST).into_response();  
-        }
-    };
+    
+	let url =  format!("https://localhost:{}{}",public_port.unwrap(),uri);
+	println!("[PROCESS] forwarding request to container {}", &url );
+	loop { //try to connect till it becomes OK
+		let attempt_time = std::time::SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+		if attempt_time - current_time < maximum_time_attempt_in_seconds {
+			println!("[PROCESS] current attempt time: {:#?}/{}", (attempt_time - current_time), maximum_time_attempt_in_seconds);
+			let request_result = client.request(parts.method.clone(), &url).headers(headers.clone()).body(bytes.clone()).send().await;
+			let _mr_ok_res = match request_result {
+				Ok(result) => {
+					let status = result.status();
+					//let bytes = result.bytes().await.unwrap();
+					let headers = result.headers().clone();
+					let body = Body::try_from(result.bytes().await.unwrap()).unwrap();
+					
+					let status_code = StatusCode::from_u16(status.as_u16()).unwrap();
+					println!("[PROCESS] Responded");
+						//todo insert to request db
+					return (status_code,headers,body).into_response();
+					
+				}
+				Err(error) => { //i think this is wrong
+					println!("[PROCESS] Failed: Retrying");
+				}
+			};
+		}else{
+			println!("[PROCESS] Responded but failed");
+			return (StatusCode::REQUEST_TIMEOUT).into_response()
+		}  
+	}
     
     
 }
