@@ -1,5 +1,5 @@
 
-use std::{path::PathBuf, time::UNIX_EPOCH};
+use std::{env, path::PathBuf, time::UNIX_EPOCH};
 
 use axum::{body::{to_bytes, Body}, extract::Request, response::IntoResponse, routing::{delete, get, patch, post, put}, Json, Router};
 use hyper::{HeaderMap, StatusCode, Uri};
@@ -272,7 +272,7 @@ pub async fn forward_request(request:Request, public_port:Option<usize>, prefix:
     let (parts, body) = request.into_parts();
     let time = std::time::SystemTime::now();
     let current_time = time.duration_since(UNIX_EPOCH).unwrap().as_secs();
-    let maximum_time_attempt_in_seconds:u64 = 10;
+    let maximum_time_attempt_in_seconds:u64 = env::var("MAX_TIME_RETRY").unwrap().parse::<u64>().unwrap();
     
     let client_builder = reqwest::ClientBuilder::new();
     let client = client_builder.use_rustls_tls().danger_accept_invalid_certs(true).build().unwrap();
