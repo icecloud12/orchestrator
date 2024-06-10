@@ -1,4 +1,4 @@
-use std::{collections::HashMap, str::FromStr, sync::OnceLock, time::{Duration, UNIX_EPOCH} };
+use std::{collections::HashMap, process::exit, str::FromStr, sync::OnceLock, time::{Duration, UNIX_EPOCH} };
 use axum::response::IntoResponse;
 use bollard::{container::{self, Config, CreateContainerOptions, ListContainersOptions, StartContainerOptions}, image::ListImagesOptions, secret::{ContainerStateStatusEnum, HostConfig, ImageSummary, PortBinding}, Docker};
 use hyper::StatusCode;
@@ -298,7 +298,14 @@ pub async fn verify_docker_containers(docker_containers:Vec<String>) -> Vec<Stri
         filters: container_options_filter,
         ..Default::default()
     };
-    let result = docker.list_containers(Some(list_container_options)).await.unwrap();
+    let result = match docker.list_containers(Some(list_container_options)).await {
+		Ok(res) => res,
+		Err(error) => {
+			println!("{:#?}", error);
+			panic!();
+		},
+	};
+	
     let new_container_list = result.iter().map(|container_summary| {
         let container_id = <Option<String> as Clone>::clone(&container_summary.id).unwrap().to_string();
         container_id

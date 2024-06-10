@@ -1,11 +1,9 @@
-use std::{env, net::SocketAddr, path::PathBuf};
-use axum::{extract::Host, handler::HandlerWithoutStateExt, response::Redirect, BoxError};
+use std::{env, net::SocketAddr, path::PathBuf, process::exit};
 use axum_server::{tls_rustls::RustlsConfig};
 use bollard::Docker;
 use dotenv::dotenv;
-use hyper::{StatusCode, Uri};
 
-use network::app_router::{self, active_service_discovery};
+use network::app_router;
 use utils::{docker_utils:: DOCKER_CONNECTION, mongodb_utils::DATABASE};
 mod utils;
 mod network;
@@ -15,7 +13,18 @@ mod handlers;
 async fn main() {
     dotenv().ok();
 
-    DOCKER_CONNECTION.get_or_init(|| Docker::connect_with_local_defaults().unwrap());
+    DOCKER_CONNECTION.get_or_init(|| {
+		match Docker::connect_with_local_defaults() {
+			Ok(docker_connection) => {
+				println!("{:#?}", &docker_connection);
+				docker_connection
+			},
+			Err(error) => {
+				println!("{}", error);
+				exit(0x0100)
+			},
+		}
+	});
     match DATABASE.set(utils::mongodb_utils::connect().await) {
         Ok(_)=>{
             listen().await;
